@@ -28,6 +28,29 @@ interface ChartData {
   macd?: { macd: Array<{ time: number; value: number }>; signal: Array<{ time: number; value: number }>; histogram: Array<{ time: number; value: number }> }
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+function hasCandles(json: ChartData | null | undefined) {
+  return Array.isArray(json?.candles) && json.candles.length > 0
+}
+
+async function fetchCandlesWithRetry(ticker: string, win: Win, urlDate: string) {
+  const params = new URLSearchParams({ window: win })
+  if (urlDate) params.set('date', urlDate)
+  const url = `/api/sentchart/charts/${encodeURIComponent(ticker)}?${params.toString()}`
+  let last: ChartData | null = null
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(url)
+    const json = await response.json() as ChartData
+    last = json
+    if (hasCandles(json)) return json
+    if (attempt < 2) await sleep(650 * (attempt + 1))
+  }
+
+  return last || { error: 'Failed to load chart data.', candles: [] }
+}
+
 // Two jobs on one page, one ticker input:
 //   • candles — native lightweight-charts OHLC + RSI/MACD/Bollinger from /api/sentchart/charts
 //   • pd|sent|ds — the high schoolers' research views, embedded Chart.js (ResearchChart)
@@ -191,11 +214,10 @@ export function ChartsPage() {
     if (!ticker || view !== 'candles') return
     let cancelled = false
     setLoading(true); setError(null)
-    fetch(`/api/sentchart/charts/${ticker}?window=${win}${urlDate ? `&date=${urlDate}` : ''}`)
-      .then(r => r.json())
+    fetchCandlesWithRetry(ticker, win, urlDate)
       .then((json: ChartData) => {
         if (cancelled) return
-        if (json.error) { setError(json.error); setData(null) }
+        if (json.error && !hasCandles(json)) { setError(json.error); setData(null) }
         else setData(json)
       })
       .catch(() => { if (!cancelled) setError('Failed to load chart data.') })
