@@ -5331,6 +5331,14 @@ function etHHMM(sec) {
     return new Intl.DateTimeFormat("en-GB", { timeZone: MARKET_WINDOW_TIME_ZONE, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(n * 1000))
   } catch (_) { return "" }
 }
+function chartHHMM(sec) {
+  const n = Number(sec || 0)
+  if (!n) return ""
+  const d = new Date(n * 1000)
+  const hh = String(d.getUTCHours()).padStart(2, "0")
+  const mm = String(d.getUTCMinutes()).padStart(2, "0")
+  return `${hh}:${mm}`
+}
 function etDate(sec) {
   const d = sec ? new Date(Number(sec) * 1000) : new Date()
   try { return new Intl.DateTimeFormat("en-CA", { timeZone: MARKET_WINDOW_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(d) }
@@ -5387,7 +5395,7 @@ app.get("/api/chart/social", async (req, res) => {
       })
     }
     const times = rows.map(r => Number(r.time || 0))
-    const labels = rows.map(r => etHHMM(r.time))
+    const labels = rows.map(r => chartHHMM(r.time))
     const density = rows.map(r => Number(r.message_count ?? 0))
     const densityPerMinute = rows.map(r => Number(r.message_density ?? 0))
     const scores = rows.map(r => Number(r.sentiment ?? 0))
