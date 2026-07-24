@@ -3993,6 +3993,18 @@ function marketSessionForSec(sec) {
   return "closed"
 }
 
+function chartMarketSessionForSec(sec) {
+  const date = new Date(Number(sec || 0) * 1000)
+  if (!Number.isFinite(date.getTime())) return "unknown"
+  const day = date.getUTCDay()
+  const minutes = date.getUTCHours() * 60 + date.getUTCMinutes()
+  if (day < 1 || day > 5) return "closed"
+  if (minutes >= 4 * 60 && minutes < 9 * 60 + 30) return "pre"
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return "regular"
+  if (minutes >= 16 * 60 && minutes < 20 * 60) return "after"
+  return "closed"
+}
+
 function addSessionScaledSocialFields(rows, bucketMinutes) {
   const maxima = new Map()
   for (const row of rows) {
@@ -4745,6 +4757,30 @@ function timestampSeconds(value) {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0
 }
 
+function chartEncodedSecFromRealSec(sec) {
+  const n = Number(sec || 0)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: MARKET_WINDOW_TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(n * 1000))
+    const get = (type) => Number(parts.find(part => part.type === type)?.value)
+    const y = get("year"), m = get("month"), d = get("day")
+    const hh = get("hour"), mm = get("minute"), ss = get("second")
+    if (![y, m, d, hh, mm, ss].every(Number.isFinite)) return 0
+    return Math.floor(Date.UTC(y, m - 1, d, hh, mm, ss) / 1000)
+  } catch (_) {
+    return 0
+  }
+}
+
 async function chartNewsEvents(db, ticker, windowMinutes = 1440) {
   const exactWindowMinutes = normalizeRollingWindowMinutes(windowMinutes, 1440)
   const days = Math.max(2, Math.ceil(exactWindowMinutes / 1440))
@@ -4923,14 +4959,14 @@ async function fetchStocktwitsWatcherCount(ticker) {
 async function chartWatcherSeries(db, ticker, windowMinutes, options = {}) {
   const requestedStart = timestampSeconds(options.startSec || options.start_sec)
   const requestedEnd = timestampSeconds(options.endSec || options.end_sec)
-  const sinceSec = requestedStart || (Math.floor(Date.now() / 1000) - normalizeRollingWindowMinutes(windowMinutes, 1440) * 60)
-  const endSec = requestedEnd || 0
+  const nowSec = Math.floor(Date.now() / 1000)
+  const sinceSec = Math.max(0, nowSec - Math.max(1440, normalizeRollingWindowMinutes(windowMinutes, 1440)) * 60)
+  const endSec = nowSec
   const collection = db.collection("stocktwits_watcher_snapshots")
   let sourceStatus = "history_missing"
   let current = null
 
   try {
-    const nowSec = Math.floor(Date.now() / 1000)
     const latest = await collection.findOne({ ticker, fetched_sec: { $lte: nowSec } }, { sort: { fetched_sec: -1 } })
     if (latest && nowSec - Number(latest.fetched_sec || 0) < 15 * 60) {
       current = latest
@@ -4947,23 +4983,45 @@ async function chartWatcherSeries(db, ticker, windowMinutes, options = {}) {
   }
 
   const match = { ticker, fetched_sec: { $gte: sinceSec } }
-  if (endSec) match.fetched_sec.$lte = endSec
-  match.fetched_sec.$lte = Math.min(endSec || Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000))
+  match.fetched_sec.$lte = endSec
   const rawRows = await collection.find(match, {
     projection: { _id: 0, ticker: 1, fetched_sec: 1, snapshot_minute: 1, watcher_count: 1, source: 1 },
   }).sort({ fetched_sec: 1 }).limit(2000).toArray()
-  const rows = dedupeWatcherSeries(rawRows, { startSec: sinceSec, endSec: match.fetched_sec.$lte })
+  const rows = dedupeWatcherSeries(rawRows, { startSec: sinceSec, endSec })
+  const mappedRows = rows
+    .map(row => ({
+      time: chartEncodedSecFromRealSec(row.fetched_sec),
+      watcher_count: Number(row.watcher_count || 0),
+    }))
+    .filter(row => row.time > 0)
+    .filter(row => (!requestedStart || row.time >= requestedStart) && (!requestedEnd || row.time <= requestedEnd))
+
+  const currentCount = Number(current?.watcher_count ?? NaN)
+  const hasCurrent = Number.isFinite(currentCount) && currentCount >= 0
+  const referenceStart = requestedStart || (hasCurrent ? chartEncodedSecFromRealSec(current?.fetched_sec || nowSec) : 0)
+  const referenceEnd = requestedEnd || referenceStart
+  const referenceValue = mappedRows.length === 1 ? mappedRows[0].watcher_count : currentCount
+  const referenceRows = mappedRows.length < 2 && Number.isFinite(referenceValue) && referenceStart && referenceEnd
+    ? [
+        { time: referenceStart, watcher_count: referenceValue },
+        { time: Math.max(referenceStart, referenceEnd), watcher_count: referenceValue },
+      ]
+    : []
+  const displayRows = mappedRows.length >= 2 ? mappedRows : referenceRows
 
   return {
-    status: sourceStatus,
+    status: mappedRows.length >= 2 ? sourceStatus : (referenceRows.length ? `${sourceStatus}_reference` : sourceStatus),
     source: "stocktwits_watchlist_count",
-    current_count: Number(current?.watcher_count ?? NaN),
-    snapshot_count: rows.length,
-    times: rows.map(row => Number(row.fetched_sec || 0)).filter(Boolean),
-    watchers: rows.map(row => Number(row.watcher_count || 0)),
-    note: rows.length > 1
+    current_count: currentCount,
+    snapshot_count: mappedRows.length,
+    reference_only: Boolean(referenceRows.length),
+    times: displayRows.map(row => Number(row.time || 0)).filter(Boolean),
+    watchers: displayRows.map(row => Number(row.watcher_count || 0)),
+    note: mappedRows.length > 1
       ? "Real Stocktwits watcher snapshots."
-      : "Watcher overlay starts when repeated real Stocktwits snapshots exist; no history is backfilled.",
+      : (referenceRows.length
+        ? "Current Stocktwits watcher count shown as a reference while real history is collecting."
+        : "Watcher overlay starts when repeated real Stocktwits snapshots exist; no history is backfilled."),
   }
 }
 
@@ -5144,7 +5202,7 @@ async function chartSocialSeries(db, ticker, windowMinutes, bucketMinutes, optio
     filled.push({
       time: Number(row._id || bucket),
       bucket_sec: Number(row._id || bucket),
-      session: marketSessionForSec(row._id || bucket),
+      session: chartMarketSessionForSec(row._id || bucket),
       message_count: count,
       message_density: Number((count / bucketMinutes).toFixed(3)),
       sentiment: count > 0 ? Number(Number(row.sentiment || 0).toFixed(3)) : 0,
@@ -5155,6 +5213,30 @@ async function chartSocialSeries(db, ticker, windowMinutes, bucketMinutes, optio
   }
 
   return addSessionScaledSocialFields(filled, bucketMinutes)
+}
+
+function emptyChartSocialSeries(startSec, endSec, bucketMinutes) {
+  const start = timestampSeconds(startSec)
+  const end = timestampSeconds(endSec)
+  const bucketSec = Math.max(1, Number(bucketMinutes || 1)) * 60
+  if (!start || !end || end < start) return []
+  const firstBucket = Math.floor(start / bucketSec) * bucketSec
+  const lastBucket = Math.floor(end / bucketSec) * bucketSec
+  const rows = []
+  for (let bucket = firstBucket; bucket <= lastBucket && rows.length < 2000; bucket += bucketSec) {
+    rows.push({
+      time: bucket,
+      bucket_sec: bucket,
+      session: chartMarketSessionForSec(bucket),
+      message_count: 0,
+      message_density: 0,
+      sentiment: 0,
+      bullish: 0,
+      bearish: 0,
+      platforms: [],
+    })
+  }
+  return addSessionScaledSocialFields(rows, bucketMinutes)
 }
 
 // Full multi-timeframe selector → (Yahoo fetch range, base interval, resample-to
@@ -5385,6 +5467,7 @@ app.get("/api/chart/social", async (req, res) => {
     const endSec = timestampSeconds(req.query.end_sec)
     let rows = []
     try { rows = db ? await chartSocialSeries(db, ticker, windowMinutes, bucketMinutes, { startSec, endSec }) : [] } catch (_) { rows = [] }
+    if (!rows.length && startSec && endSec) rows = emptyChartSocialSeries(startSec, endSec, bucketMinutes)
     if (!rows.length) {
       return res.json({
         status: "ok", source: "none", messages: 0, bullish: 0, bearish: 0, complete: true,
@@ -5403,7 +5486,7 @@ app.get("/api/chart/social", async (req, res) => {
     const bullish = rows.reduce((a, r) => a + Number(r.bullish ?? 0), 0)
     const bearish = rows.reduce((a, r) => a + Number(r.bearish ?? 0), 0)
     res.json({
-      status: "ok", source: "feedflash-social", messages, bullish, bearish, complete: true,
+      status: "ok", source: messages ? "feedflash-social" : "feedflash-social-empty-window", messages, bullish, bearish, complete: true,
       labels, times, density, density_smooth: density, density_per_minute: densityPerMinute,
       sent_labels: labels, sent_times: times, scores, scores_smooth: scores,
       win_density: density, win_density_smooth: density, window_minutes: windowMinutes, bucket_minutes: bucketMinutes,

@@ -263,11 +263,13 @@ export function ChartsPage() {
         if (cancelled) return
         if (s.error) { setSocialMsg('Social: ' + s.error); return }
         if (s.status === 'walking') { setSocialMsg(`Loading social history, ${s.count || 0} messages…`); timer = window.setTimeout(poll, 1500); return }
-        if (!s.messages) {
+        const hasPrimarySeries = Array.isArray(s.labels) && s.labels.length > 0
+        if (!hasPrimarySeries) {
           s = await fetch(`/api/sentchart/chart/social?${new URLSearchParams({ ticker, date: chartDate })}`).then(r => r.json())
           if (cancelled) return
         }
-        if (!s.messages) {
+        const hasAnySeries = Array.isArray(s.labels) && s.labels.length > 0
+        if (!hasAnySeries) {
           const emptySeries: SocialSeries = { labels: [], density: [], sent_labels: [], scores_smooth: [], roll_window: overlayRollingMinutes }
           socialCache.current[key] = emptySeries
           setSocial(emptySeries)
@@ -282,7 +284,10 @@ export function ChartsPage() {
           roll_window: Number(s.window_minutes || s.roll_window || overlayRollingMinutes),
         }
         socialCache.current[key] = series
-        setSocial(series); setSocialMsg(`Evidence: ${s.source} · ${s.messages} rows`)
+        setSocial(series)
+        setSocialMsg(Number(s.messages || 0) > 0
+          ? `Evidence: ${s.source} · ${s.messages} rows`
+          : 'No social posts in this chart window · showing zero/neutral baseline')
       } catch { if (!cancelled) setSocialMsg('Social data: error') }
     }
     poll()
