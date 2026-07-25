@@ -1,7 +1,14 @@
 'use client'
 import { useEffect, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
+import zoomPlugin from 'chartjs-plugin-zoom'
 import { smoothSame, trailingCount, ROLL_WINDOW_DEFAULT } from './chartAgg'
+
+// Registered here rather than in a global chart bootstrap: ResearchChart is the
+// only Chart.js consumer in the app, and the plugin is inert on any chart that
+// doesn't opt in via options.plugins.zoom (pan/wheel/pinch all default off), so
+// only the Price+Density view becomes zoomable.
+Chart.register(zoomPlugin)
 
 // ── Embedded Chart.js research views ─────────────────────────────────────────
 // Faithful React port of the legacy dashboard's three research charts (the views
@@ -119,9 +126,124 @@ const hiLoPlugin = {
   },
 }
 
-function buildConfig(mode: ResearchMode, d: PriceData, social: SocialData, win: Win, windowMin = 15): any {
+// ── X-axis tick presentation (shared by all three views) ─────────────────────
+// The x scale is a CATEGORY scale over the backend's "HH:MM" strings, one per
+// minute. That label array is load-bearing: marketLinesPlugin does
+// labels.indexOf('09:30'), hiLoPlugin prints labels[i], and every series joins
+// on those exact keys. So all clarity work happens at DISPLAY time — via
+// afterBuildTicks + ticks.callback — and the array is never rewritten.
+
+const AXIS_TICK_COLOR = '#cbd5e1'   // slate-300, ~12:1 on --bg #0F172A (was #4e5567, ~2.4:1)
+const AXIS_TICK_SIZE = 11           // was 8
+const AXIS_TITLE_SIZE = 10
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+// 'YYYY-MM-DD' -> 'Jul 23'. Parsed straight off the string, never through
+// Date(), so the viewer's timezone can't shift an ET session date by a day.
+function shortDate(iso?: string | null): string | null {
+  if (!iso) return null
+  const [, m, d] = iso.split('-').map(Number)
+  return m && d ? `${MONTHS[m - 1]} ${d}` : null
+}
+
+const minutesOf = (label: string): number => +label.slice(0, 2) * 60 + +label.slice(3, 5)
+
+// Visible span (minutes) -> tick spacing, targeting ~12-16 labels at any zoom.
+// Because labels are consecutive minutes, selecting on HH:MM % step === 0 puts
+// every tick on a clean boundary — the old maxTicksLimit:16 autoSkip picked
+// evenly spaced INDICES instead, which on the 24-h view landed on arbitrary
+// half-hour offsets (20:00, 21:30, 23:00, …).
+function tickStepMinutes(span: number): number {
+  if (span > 1080) return 120
+  if (span > 480) return 60
+  if (span > 240) return 30
+  if (span > 120) return 15
+  if (span > 60) return 10
+  if (span > 20) return 5
+  return 1
+}
+
+const MAX_VISIBLE_TICKS = 24
+
+function xScale(labels: string[], d: PriceData): any {
+  // The social timeline is [prev_date 20:00, date 20:00), so any label at or
+  // after 20:00 belongs to the PREVIOUS calendar day. That crossing is exactly
+  // why a bare "03:00" used to be ambiguous.
+  const SESSION_END_MIN = 20 * 60
+  const today = shortDate(d.date)
+  const yesterday = shortDate(d.prev_date)
+  const dayOf = (label: string) => (minutesOf(label) >= SESSION_END_MIN ? yesterday : today)
+
+  return {
+    grid: { color: '#1e2330' },
+    ticks: {
+      color: AXIS_TICK_COLOR,
+      font: { size: AXIS_TICK_SIZE },
+      // afterBuildTicks has already chosen a clean, non-overlapping set;
+      // autoSkip would re-thin it and break the boundary snapping.
+      autoSkip: false,
+      maxRotation: 0,
+      minRotation: 0,
+      callback(value: any, i: number) {
+        const label = labels[value as number]
+        if (!label) return ''
+        // Date context where it actually resolves ambiguity: the leftmost tick
+        // in view, and the midnight rollover. Returning an array renders as
+        // stacked lines, so it never crowds the neighbouring times.
+        const day = (i === 0 || minutesOf(label) === 0) ? dayOf(label) : null
+        return day ? [label, day] : label
+      },
+    },
+    // Zoom-aware: axis.min/max are the current visible index bounds, which
+    // chartjs-plugin-zoom updates on wheel/pan, so the granularity re-derives
+    // itself on every frame (hourly zoomed out -> per-minute zoomed all the way in).
+    afterBuildTicks(axis: any) {
+      const last = labels.length - 1
+      const lo = Math.max(0, Math.ceil(axis.min ?? 0))
+      const hi = Math.min(last, Math.floor(axis.max ?? last))
+      if (hi <= lo) return
+      const step = tickStepMinutes(hi - lo + 1)
+      const picked: Array<{ value: number }> = []
+      for (let i = lo; i <= hi; i++) {
+        if (minutesOf(labels[i]) % step === 0) picked.push({ value: i })
+      }
+      if (!picked.length) return          // leave Chart.js's own ticks rather than blanking the axis
+      const thin = Math.ceil(picked.length / MAX_VISIBLE_TICKS)
+      axis.ticks = thin > 1 ? picked.filter((_, k) => k % thin === 0) : picked
+    },
+  }
+}
+
+// Wheel/drag/pinch zoom on the x axis only — the y scales are pinned to
+// data-derived bounds (price min/max, density headroom), so letting them zoom
+// would just desynchronise the two axes. Price+Density only.
+function zoomOpts(onZoomChange?: (zoomed: boolean) => void): any {
+  const notify = ({ chart }: any) => onZoomChange?.(chart.isZoomedOrPanned())
+  return {
+    pan: { enabled: true, mode: 'x', threshold: 4, onPanComplete: notify },
+    zoom: {
+      wheel: { enabled: true, speed: 0.12 },
+      pinch: { enabled: true },
+      mode: 'x',
+      onZoomComplete: notify,
+    },
+    // Never pan past the loaded session, and stop at a 10-minute floor so the
+    // chart can't be zoomed into a single bar with no context.
+    limits: { x: { min: 'original', max: 'original', minRange: 10 } },
+  }
+}
+
+function buildConfig(
+  mode: ResearchMode, d: PriceData, social: SocialData, win: Win, windowMin = 15,
+  onZoomChange?: (zoomed: boolean) => void,
+): any {
   const labels = researchLabels(d, social, win)
-  Chart.defaults.color = '#4e5567'
+  // Legend text keeps its previous dim value explicitly. This used to come from
+  // a `Chart.defaults.color` mutation, which reached across every chart in the
+  // app from inside a render path; everything that relied on it is now set on
+  // the scale/plugin that actually needs it.
+  const legend = { display: true, labels: { color: '#4e5567', font: { size: 9 }, boxWidth: 12 } }
   const baseOpts = {
     responsive: true, maintainAspectRatio: false, animation: false as const,
     interaction: { mode: 'index' as const, intersect: false },
@@ -167,18 +289,19 @@ function buildConfig(mode: ResearchMode, d: PriceData, social: SocialData, win: 
       ] },
       plugins: [marketLinesPlugin, hiLoPlugin],
       options: { ...baseOpts,
-        plugins: { legend: { display: true, labels: { font: { size: 9 }, boxWidth: 12 } },
+        plugins: { legend,
                    // skip the synthetic overnight carry — High/Low mark real bars only
-                   hiLo: { enabled: true, skipBefore: firstReal } },
+                   hiLo: { enabled: true, skipBefore: firstReal },
+                   zoom: zoomOpts(onZoomChange) },
         scales: {
-          x: { grid: { color: '#1e2330' }, ticks: { font: { size: 8 }, maxTicksLimit: 16 } },
+          x: xScale(labels, d),
           y1: { position: 'left', min: pMin * 0.97, max: pMax * 1.08,
-                grid: { color: '#1e2330' }, ticks: { font: { size: 8 }, color: '#2196F3' },
-                title: { display: true, text: 'Close Price ($)', color: '#2196F3', font: { size: 10 } } },
+                grid: { color: '#1e2330' }, ticks: { font: { size: AXIS_TICK_SIZE }, color: '#2196F3' },
+                title: { display: true, text: 'Close Price ($)', color: '#2196F3', font: { size: AXIS_TITLE_SIZE } } },
           y2: { position: 'right', beginAtZero: true,
                 max: Math.max(maxDen * 2.5, maxTrail * 1.15),
-                grid: { display: false }, ticks: { font: { size: 8 }, color: '#FF9800' },
-                title: { display: true, text: 'Messages (bars: per min · line: per window)', color: '#FF9800', font: { size: 10 } } },
+                grid: { display: false }, ticks: { font: { size: AXIS_TICK_SIZE }, color: '#FF9800' },
+                title: { display: true, text: 'Messages (bars: per min · line: per window)', color: '#FF9800', font: { size: AXIS_TITLE_SIZE } } },
         },
       },
     }
@@ -198,12 +321,14 @@ function buildConfig(mode: ResearchMode, d: PriceData, social: SocialData, win: 
       ] },
       plugins: [marketLinesPlugin, zeroLinePlugin],
       options: { ...baseOpts,
-        plugins: { legend: { display: true, labels: { font: { size: 9 }, boxWidth: 12 } }, zeroLine: { scale: 'ys' } },
+        plugins: { legend, zeroLine: { scale: 'ys' } },
         scales: {
-          x: { grid: { color: '#1e2330' }, ticks: { font: { size: 8 }, maxTicksLimit: 16 } },
+          x: xScale(labels, d),
+          // ys was the one y axis left on the dim global default; colored to its
+          // smoothed-score series, matching how pd/ds tint their axes.
           ys: { position: 'left', min: -1.1, max: 1.1,
-                grid: { color: '#1e2330' }, ticks: { font: { size: 8 } },
-                title: { display: true, text: 'Sentiment Score  (−1 = Bearish | +1 = Bullish)', font: { size: 10 } } },
+                grid: { color: '#1e2330' }, ticks: { font: { size: AXIS_TICK_SIZE }, color: '#4CAF50' },
+                title: { display: true, text: 'Sentiment Score  (−1 = Bearish | +1 = Bullish)', color: '#4CAF50', font: { size: AXIS_TITLE_SIZE } } },
         },
       },
     }
@@ -227,15 +352,15 @@ function buildConfig(mode: ResearchMode, d: PriceData, social: SocialData, win: 
     ] },
     plugins: [marketLinesPlugin, zeroLinePlugin],
     options: { ...baseOpts,
-      plugins: { legend: { display: true, labels: { font: { size: 9 }, boxWidth: 12 } }, zeroLine: { scale: 'ys' } },
+      plugins: { legend, zeroLine: { scale: 'ys' } },
       scales: {
-        x: { grid: { color: '#1e2330' }, ticks: { font: { size: 8 }, maxTicksLimit: 16 } },
+        x: xScale(labels, d),
         y1: { position: 'left', beginAtZero: true, max: maxDen * 2.2,
-              grid: { color: '#1e2330' }, ticks: { font: { size: 8 }, color: '#2196F3' },
-              title: { display: true, text: 'Messages per 5-min window', color: '#2196F3', font: { size: 10 } } },
+              grid: { color: '#1e2330' }, ticks: { font: { size: AXIS_TICK_SIZE }, color: '#2196F3' },
+              title: { display: true, text: 'Messages per 5-min window', color: '#2196F3', font: { size: AXIS_TITLE_SIZE } } },
         ys: { position: 'right', min: -1.5, max: 1.5,
-              grid: { display: false }, ticks: { font: { size: 8 }, color: '#FF5722' },
-              title: { display: true, text: 'Sentiment Score  (−1 to +1)', color: '#FF5722', font: { size: 10 } } },
+              grid: { display: false }, ticks: { font: { size: AXIS_TICK_SIZE }, color: '#FF5722' },
+              title: { display: true, text: 'Sentiment Score  (−1 to +1)', color: '#FF5722', font: { size: AXIS_TITLE_SIZE } } },
       },
     },
   }
@@ -252,7 +377,20 @@ const TITLES: Record<ResearchMode, string> = {
 // slider remains live so shorter lead/lag windows can still be inspected.
 const WIN_MIN = 1, WIN_MAX = 480, WIN_DEFAULT = 240
 
-export function ResearchChart({ ticker, mode, window: win, date }: { ticker: string; mode: ResearchMode; window: Win; date?: string }) {
+interface Props {
+  ticker: string
+  mode: ResearchMode
+  window: Win
+  date?: string
+  // Zoom control wiring for the toolbar's "Reset zoom" button, which lives up in
+  // ChartsPage next to the Full/2h/1h presets. The parent hands down a ref we
+  // fill with a reset closure, plus a setter so the button can disable itself
+  // while the chart sits at its original extent.
+  zoomResetRef?: { current: (() => void) | null }
+  onZoomedChange?: (zoomed: boolean) => void
+}
+
+export function ResearchChart({ ticker, mode, window: win, date, zoomResetRef, onZoomedChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const chartRef = useRef<Chart | null>(null)
   const pollRef = useRef<number | null>(null)
@@ -261,6 +399,10 @@ export function ResearchChart({ ticker, mode, window: win, date }: { ticker: str
   // re-fetching; `windowMin` drives the client-side rolling density (pd view).
   const [bundle, setBundle] = useState<{ d: PriceData; s: SocialData } | null>(null)
   const [windowMin, setWindowMin] = useState(WIN_DEFAULT)
+  // Visible x range carried across a rebuild, so dragging the rolling-window
+  // slider while zoomed in doesn't yank the view back to the full session.
+  // Only valid while the label array is identical — cleared on any refetch.
+  const zoomStateRef = useRef<{ min: number; max: number } | null>(null)
 
   const destroyChart = () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null } }
 
@@ -269,6 +411,10 @@ export function ResearchChart({ ticker, mode, window: win, date }: { ticker: str
   useEffect(() => {
     let cancelled = false
     setStatus('Loading…'); setBundle(null)
+    // ticker/mode/win/date all change the label array, so saved index bounds
+    // would point at the wrong minutes. Start the new series unzoomed.
+    zoomStateRef.current = null
+    onZoomedChange?.(false)
 
     const run = async () => {
       const d: PriceData = await fetchJSON(`/api/sentchart/chart?${new URLSearchParams({ ticker, window: win, ...(date ? { date } : {}) })}`)
@@ -307,14 +453,42 @@ export function ResearchChart({ ticker, mode, window: win, date }: { ticker: str
     if (!bundle) { destroyChart(); return }
     const t = window.setTimeout(() => {
       if (!canvasRef.current) return
+      // Carry the current visible range over the destroy/rebuild.
+      const prevX = chartRef.current?.scales?.x
+      if (prevX && (chartRef.current as any).isZoomedOrPanned?.()) {
+        zoomStateRef.current = { min: prevX.min, max: prevX.max }
+      }
       destroyChart()
-      chartRef.current = new Chart(canvasRef.current, buildConfig(mode, bundle.d, bundle.s, win, windowMin))
+      const chart = new Chart(
+        canvasRef.current,
+        buildConfig(mode, bundle.d, bundle.s, win, windowMin, onZoomedChange),
+      )
+      chartRef.current = chart
+      const saved = zoomStateRef.current
+      if (mode === 'pd' && saved) {
+        // 'none' — reapply silently, no animation and no zoom-complete callback.
+        ;(chart as any).zoomScale('x', { min: saved.min, max: saved.max }, 'none')
+      }
+      if (zoomResetRef) {
+        zoomResetRef.current = mode === 'pd'
+          ? () => {
+              zoomStateRef.current = null
+              ;(chart as any).resetZoom()
+              onZoomedChange?.(false)
+            }
+          : null
+      }
+      onZoomedChange?.(mode === 'pd' && !!saved)
     }, 40)
     return () => window.clearTimeout(t)
   }, [bundle, windowMin, mode, win])
 
-  // Destroy the Chart.js instance on unmount (NOTES.md: never leave one on a reused canvas).
-  useEffect(() => destroyChart, [])
+  // Destroy the Chart.js instance on unmount (NOTES.md: never leave one on a reused
+  // canvas) and drop the parent's reset handle with it.
+  useEffect(() => () => {
+    destroyChart()
+    if (zoomResetRef) zoomResetRef.current = null
+  }, [])
 
   return (
     <div className="flex flex-col h-full">
@@ -333,6 +507,7 @@ export function ResearchChart({ ticker, mode, window: win, date }: { ticker: str
             className="flex-1 accent-orange-500 cursor-pointer"
             aria-label="Density rolling window in minutes"
           />
+          <span className="text-[10px] text-neutral whitespace-nowrap">scroll to zoom · drag to pan</span>
         </div>
       )}
       <div className="flex-1 min-h-0 p-2">

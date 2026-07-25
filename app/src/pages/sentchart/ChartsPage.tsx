@@ -118,6 +118,11 @@ export function ChartsPage() {
   const [ticker, setTicker] = useState<string | null>(urlTicker || null)
   const [view, setView] = useState<View>('candles')
   const [win, setWin] = useState<Win>('full')
+  // Price+Density wheel/drag zoom lives inside ResearchChart's Chart.js instance;
+  // the reset control belongs up here beside the window presets, so we hold a
+  // handle to it and mirror whether the chart is currently zoomed.
+  const zoomResetRef = useRef<(() => void) | null>(null)
+  const [pdZoomed, setPdZoomed] = useState(false)
   const [data, setData] = useState<ChartData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -425,6 +430,18 @@ export function ChartsPage() {
           ))}
         </div>
 
+        {/* Price+Density only: escape hatch from wheel/drag zoom back to the full window. */}
+        {view === 'pd' && (
+          <button
+            onClick={() => zoomResetRef.current?.()}
+            disabled={!pdZoomed}
+            title={pdZoomed ? 'Return to the full loaded range' : 'Scroll to zoom, drag to pan'}
+            className="rounded border border-border px-3 py-1.5 text-xs text-neutral hover:border-accent hover:text-white disabled:opacity-40 disabled:hover:border-border disabled:hover:text-neutral transition-colors"
+          >
+            Reset zoom
+          </button>
+        )}
+
         {ticker && <span className="text-accent font-mono font-bold text-lg ml-1">{ticker}</span>}
         {/* Structured-news alert — fires only when FeedFlash has recent news for the ticker */}
         {enrich?.news_alert && (
@@ -561,7 +578,10 @@ export function ChartsPage() {
             )
           ) : (
             <div className="bg-surface border border-border rounded-lg overflow-hidden" style={{ height: 460 }}>
-              <ResearchChart ticker={ticker} mode={view} window={win} date={urlDate} />
+              <ResearchChart
+                ticker={ticker} mode={view} window={win} date={urlDate}
+                zoomResetRef={zoomResetRef} onZoomedChange={setPdZoomed}
+              />
             </div>
           )}
 
