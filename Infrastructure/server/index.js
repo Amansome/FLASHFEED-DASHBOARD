@@ -7219,6 +7219,30 @@ app.use('/api/correlation', correlationRouter)
 app.use('/api/settings',    settingsRouter)
 app.use('/api/decision-map', decisionMapRouter)
 
+// ── chart-service passthrough ─────────────────────────────
+// The charts/screener pages call /api/sentchart/* directly. Those routes live in
+// the Flask chart-service, so with the SPA now served from this origin there is no
+// Vercel rewrite left to fan them out — proxy them here instead. CHART_SERVICE_URL
+// is already set on the Railway backend service.
+const SENTCHART_UPSTREAM = (process.env.CHART_SERVICE_URL || 'http://localhost:5055').replace(/\/+$/, '')
+const SENTCHART_TIMEOUT_MS = Number(process.env.CHART_SERVICE_TIMEOUT_MS || 90_000)
+app.use('/api/sentchart', async (req, res) => {
+  const target = `${SENTCHART_UPSTREAM}/api/sentchart${req.url}`
+  try {
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers: { accept: req.headers.accept || 'application/json' },
+      signal: AbortSignal.timeout(SENTCHART_TIMEOUT_MS),
+    })
+    const contentType = upstream.headers.get('content-type')
+    if (contentType) res.set('content-type', contentType)
+    res.status(upstream.status).send(Buffer.from(await upstream.arrayBuffer()))
+  } catch (err) {
+    console.error(`chart-service proxy failed for ${req.originalUrl}:`, err.message)
+    res.status(502).json({ ok: false, error: `chart-service unreachable: ${String(err.message || err)}` })
+  }
+})
+
 // ── Health check ──────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   const { readyState } = mongoose.connection
@@ -7274,6 +7298,45 @@ async function ensureRuntimeIndexes() {
     ),
     db.collection("source_status").createIndex({ source: 1 }, { unique: true }),
   ])
+}
+
+// ── Built frontend (single-service deploy) ──────────────────
+// This process serves app/dist as well as the API, so the Railway backend is the
+// one origin for both. The Docker image copies the Vite build to /app/public;
+// the repo-relative paths keep `npm run start` working from a dev checkout too.
+const FRONTEND_DIST = [
+  process.env.FRONTEND_DIST_DIR,
+  path.join(SERVER_DIR, 'public'),
+  path.join(PROJECT_ROOT, 'app', 'dist'),
+].filter(Boolean).find(dir => fs.existsSync(path.join(dir, 'index.html')))
+
+function mountFrontend() {
+  if (!FRONTEND_DIST) {
+    console.log('  Frontend →  not bundled (no index.html found) — API-only mode')
+    return
+  }
+  const indexHtml = path.join(FRONTEND_DIST, 'index.html')
+
+  // Hashed Vite assets are immutable; index.html must never be cached or a deploy
+  // leaves browsers pinned to asset names that no longer exist.
+  app.use(express.static(FRONTEND_DIST, {
+    index: false,
+    setHeaders(res, filePath) {
+      res.setHeader('Cache-Control', filePath === indexHtml
+        ? 'no-cache'
+        : 'public, max-age=31536000, immutable')
+    },
+  }))
+
+  // SPA fallback: any non-API GET (deep links like /entry-screener, and refreshes
+  // on them) renders the app shell instead of 404ing. API paths still fall through
+  // to Express' own 404 so a bad /api/* call never returns HTML.
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next()
+    res.sendFile(indexHtml)
+  })
+
+  console.log(`  Frontend →  serving ${FRONTEND_DIST}`)
 }
 
 async function start() {
@@ -9369,6 +9432,12 @@ app.delete('/api/settings/keywords/:keyword', async (req, res) => {
     if (t.unref) t.unref()
     console.log(`  OnSiteAutoFetch → enabled (every ${Math.round(ONSITE_FETCH_INTERVAL_MS / 60000)} min while on-site → 'fetch' ${diskFetchDays}d)`)
   }
+
+  // ── Frontend (built SPA) ──────────────────────────────────
+  // Registered LAST, after every /api/* route above (module-level routes run at
+  // import time; the in-start() ones are all registered before we get here), so
+  // the catch-all can never shadow an API path.
+  mountFrontend()
 
 app.listen(PORT, () => {
     console.log()

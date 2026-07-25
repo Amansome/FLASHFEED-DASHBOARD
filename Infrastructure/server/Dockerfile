@@ -1,3 +1,15 @@
+# ── Stage 1: build the frontend ───────────────────────────────────────────────
+# The API image also serves the dashboard, so the Vite build happens here and only
+# the emitted dist/ is carried into the runtime stage (no app/node_modules, no
+# toolchain). app/dist is .dockerignore'd so a stale local build can't leak in.
+FROM node:22-slim AS frontend
+WORKDIR /build
+COPY app/package*.json ./
+RUN npm ci
+COPY app ./
+RUN npm run build
+
+# ── Stage 2: backend runtime (also serves the built frontend) ─────────────────
 FROM node:22-slim
 
 WORKDIR /app
@@ -33,6 +45,9 @@ COPY 5_Social ./5_Social
 COPY config ./config
 COPY scripts ./scripts
 COPY scripts /scripts
+
+# Built dashboard — express.static + SPA fallback serve this (see mountFrontend()).
+COPY --from=frontend /build/dist ./public
 
 ENV PYTHONUNBUFFERED=1
 ENV RSS_COOLDOWN_SECONDS=0
