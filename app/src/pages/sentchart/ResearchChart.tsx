@@ -239,11 +239,13 @@ function buildConfig(
   onZoomChange?: (zoomed: boolean) => void,
 ): any {
   const labels = researchLabels(d, social, win)
-  // Legend text keeps its previous dim value explicitly. This used to come from
-  // a `Chart.defaults.color` mutation, which reached across every chart in the
-  // app from inside a render path; everything that relied on it is now set on
-  // the scale/plugin that actually needs it.
-  const legend = { display: true, labels: { color: '#4e5567', font: { size: 9 }, boxWidth: 12 } }
+  // Legend text was the last thing still carrying the old dim #4e5567 at 9px —
+  // the same ~2.4:1 contrast the axis ticks were just moved off. It now reuses
+  // the axis constants so the two can't drift apart again.
+  const legend = {
+    display: true,
+    labels: { color: AXIS_TICK_COLOR, font: { size: AXIS_TICK_SIZE }, boxWidth: 12 },
+  }
   const baseOpts = {
     responsive: true, maintainAspectRatio: false, animation: false as const,
     interaction: { mode: 'index' as const, intersect: false },
