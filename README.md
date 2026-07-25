@@ -2,7 +2,7 @@
 
 FlashFeed aggregates news, social sentiment, screener data, and momentum signals using Docker, MongoDB, Redis, Kafka, and a React frontend.
 
-**Live:** https://backend-production-da72.up.railway.app — the Railway `backend` service serves both the dashboard and the API from one origin (see `Infrastructure/server/Dockerfile`).
+**Live:** https://backend-production-da72.up.railway.app — the Railway `backend` service serves both the dashboard and the API from one origin (see `Infrastructure/server/Dockerfile`). Commits on `main` deploy automatically.
 
 ---
 
