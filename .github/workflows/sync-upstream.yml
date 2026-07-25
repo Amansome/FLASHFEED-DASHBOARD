@@ -1,0 +1,61 @@
+name: Sync fork main with upstream
+
+# Keeps Amansome/FLASHFEED-DASHBOARD:main a pure mirror of
+# OtisMurray/FLASHFEED-DASHBOARD:main, which is what Railway's backend service
+# deploys from. Needs only read access to upstream (it is public) and write
+# access to this fork — nothing from the upstream owner.
+#
+# This workflow deliberately lives on the `fork-sync` branch (this fork's default
+# branch), NOT on main. Scheduled workflows only run from the default branch, and
+# main has to stay byte-identical to upstream — a workflow file committed there
+# would be wiped by the very fast-forward this job performs.
+
+on:
+  schedule:
+    # Every 15 min, offset off the hour: GitHub's shared scheduler is heavily
+    # oversubscribed at :00 and delays those runs the most.
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fast-forward main to upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/OtisMurray/FLASHFEED-DASHBOARD.git
+          git fetch --quiet upstream main
+
+          UPSTREAM=$(git rev-parse upstream/main)
+          CURRENT=$(git rev-parse HEAD)
+
+          if [ "$UPSTREAM" = "$CURRENT" ]; then
+            echo "Already in sync at ${CURRENT:0:7}."
+            exit 0
+          fi
+
+          # Fast-forward only. If main ever picks up a commit upstream does not
+          # have, stop loudly rather than force-pushing over it — a silent
+          # overwrite here would be indistinguishable from data loss.
+          if ! git merge-base --is-ancestor "$CURRENT" "$UPSTREAM"; then
+            echo "::error::fork main (${CURRENT:0:7}) has diverged from upstream (${UPSTREAM:0:7}); refusing to force-push"
+            exit 1
+          fi
+
+          git push origin "$UPSTREAM:refs/heads/main"
+          echo "Fast-forwarded main ${CURRENT:0:7} -> ${UPSTREAM:0:7}"
+          echo "Railway will pick this up via its push webhook on main."
