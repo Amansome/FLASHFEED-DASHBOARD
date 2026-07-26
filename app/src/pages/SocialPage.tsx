@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
+import { useTickerDatalistOptions } from '@/lib/useTickerUniverse'
 
 type SocialPost = {
   platform?: string
@@ -60,6 +61,7 @@ const tabs = [
 
 function GrokSocialAnalysis() {
   const [input, setInput] = useState('AAPL')
+  const tickerOptions = useTickerDatalistOptions(input)
   const [ticker, setTicker] = useState('')
   const [analysis, setAnalysis] = useState('')
   const [model, setModel] = useState('')
@@ -122,11 +124,17 @@ function GrokSocialAnalysis() {
         <div className="ml-auto flex items-center gap-2">
           <input
             value={input}
+            list="social-analysis-ticker-universe"
             onChange={e => setInput(e.target.value.toUpperCase())}
             onKeyDown={e => { if (e.key === 'Enter') analyze() }}
             placeholder="Ticker"
             className="w-28 bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-sm uppercase font-mono"
           />
+          <datalist id="social-analysis-ticker-universe">
+            {tickerOptions.map(row => (
+              <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+            ))}
+          </datalist>
           <button
             type="button"
             onClick={() => analyze()}
@@ -289,6 +297,7 @@ export default function SocialPage() {
   const [lastUpdated, setLastUpdated] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [tickerSearch, setTickerSearch] = useState('')
+  const tickerSearchOptions = useTickerDatalistOptions(tickerSearch)
   const [tickerFilter, setTickerFilter] = useState('')
   const [phraseFilter, setPhraseFilter] = useState('')
   const [platformStatus, setPlatformStatus] = useState<PlatformStatus[]>([])
@@ -414,10 +423,16 @@ export default function SocialPage() {
           <form onSubmit={searchTicker} className="flex items-center gap-2">
             <input
               value={tickerSearch}
+              list="social-feed-ticker-universe"
               onChange={e => setTickerSearch(e.target.value.toUpperCase())}
               placeholder="Search ticker"
               className="w-32 bg-slate-900 border border-slate-600 rounded-md px-3 py-2 text-sm uppercase"
             />
+            <datalist id="social-feed-ticker-universe">
+              {tickerSearchOptions.map(row => (
+                <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+              ))}
+            </datalist>
             <button
               type="submit"
               disabled={searching}

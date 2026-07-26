@@ -15,7 +15,7 @@ export interface BollingerBands { upper: LinePoint[]; lower: LinePoint[] }
 export interface SocialSeries {
   labels: string[]; density: number[]
   density_per_minute?: number[]
-  sent_labels: string[]; scores_smooth: number[]
+  sent_labels: string[]; scores?: number[]; scores_smooth: number[]; sentiment_weights?: number[]; win_density?: number[]
   // New backend payload includes real unix seconds.  Older payloads only had
   // HH:MM labels, so these stay optional for backward compatibility.
   times?: number[]
@@ -23,8 +23,8 @@ export interface SocialSeries {
 }
 
 // Trailing rolling COUNT (owner's spec): the value at minute t is the total
-// number of messages over the past k minutes, inclusive of the current minute.
-// This is causal/backward-looking and matches Aman's Price + Density chart.
+// number of messages over the past k minutes, inclusive of the t-k edge and
+// current minute. This is causal/backward-looking and matches chart-service.
 export function trailingCount(values: number[], k: number): number[] {
   const n = values.length
   const out: number[] = []
@@ -32,8 +32,28 @@ export function trailingCount(values: number[], k: number): number[] {
   const window = Math.max(1, Math.round(k))
   for (let i = 0; i < n; i += 1) {
     sum += Number(values[i] || 0)
-    if (i - window >= 0) sum -= Number(values[i - window] || 0)
+    if (i - window - 1 >= 0) sum -= Number(values[i - window - 1] || 0)
     out.push(sum)
+  }
+  return out
+}
+
+export function trailingWeightedAverage(values: number[], weights: number[], k: number): number[] {
+  const out: number[] = []
+  let weighted = 0
+  let totalWeight = 0
+  const window = Math.max(1, Math.round(k))
+  for (let i = 0; i < values.length; i += 1) {
+    const w = Number(weights[i] || 0)
+    const v = Number(values[i] || 0)
+    weighted += v * w
+    totalWeight += w
+    if (i - window - 1 >= 0) {
+      const oldW = Number(weights[i - window - 1] || 0)
+      weighted -= Number(values[i - window - 1] || 0) * oldW
+      totalWeight -= oldW
+    }
+    out.push(totalWeight > 0 ? Number((weighted / totalWeight).toFixed(4)) : 0)
   }
   return out
 }
@@ -199,7 +219,14 @@ export function overlaySeries(
   // one-minute buckets, so the rolling overlay is a real trailing message count.
   // Keep `density_per_minute` separate for diagnostics; do not roll it here.
   const rawDensity = Array.isArray(social.density) ? social.density.map(v => Number(v || 0)) : []
+  const rawSentiment = Array.isArray(social.scores) && social.scores.length
+    ? social.scores.map(v => Number(v || 0))
+    : (social.scores_smooth || []).map(v => Number(v || 0))
+  const sentimentWeights = Array.isArray(social.sentiment_weights) && social.sentiment_weights.length
+    ? social.sentiment_weights.map(v => Number(v || 0))
+    : rawDensity
   const densSmooth = trailingCount(rawDensity, windowMin)
+  const sentSmooth = trailingWeightedAverage(rawSentiment, sentimentWeights, windowMin)
   const dAcc = new Map<number, { sum: number; n: number }>()
   const sAcc = new Map<number, { sum: number; n: number }>()
 
@@ -218,10 +245,10 @@ export function overlaySeries(
   }
 
   if (Array.isArray(social.sent_times) && social.sent_times.length) {
-    social.sent_times.forEach((t, i) => add(sAcc, Number(t), (social.scores_smooth || [])[i]))
+    social.sent_times.forEach((t, i) => add(sAcc, Number(t), sentSmooth[i]))
   } else {
     const sentByLabel = new Map<string, number>()
-    ;(social.sent_labels || []).forEach((l, i) => sentByLabel.set(l, (social.scores_smooth || [])[i]))
+    ;(social.sent_labels || []).forEach((l, i) => sentByLabel.set(l, sentSmooth[i]))
     for (const c of rawCandles) {
       const label = etLabel(c.time)
       if (sentByLabel.has(label)) add(sAcc, c.time, sentByLabel.get(label))

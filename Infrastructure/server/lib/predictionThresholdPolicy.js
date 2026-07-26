@@ -1,4 +1,4 @@
-export const PREDICTION_THRESHOLD_POLICY_VERSION = 'density_corr_float_guarded_w120_c038_pre60le4_msg3_partial_runner_v11'
+export const PREDICTION_THRESHOLD_POLICY_VERSION = 'density_corr_float_guarded_w120_c038_pre60le4_msg3_partial_runner_open_guard_v11'
 export const PREDICTION_THRESHOLD_FEATURE_SOURCE = 'mongo_ohlc_social_density_v11'
 
 export const PREDICTION_THRESHOLD_POLICY = {
@@ -14,6 +14,7 @@ export const PREDICTION_THRESHOLD_POLICY = {
     float_gate: 'ultra-low and low-float rows require stronger message/catalyst/social/short-interest support; high-float rows require stronger liquidity/relative-volume support',
     overextension_gate: 'reject active-session moves that are already beyond the float-adjusted move cap before the signal',
     session_gate: 'premarket/weekend catalysts can queue candidates, but live trading entries require market-session confirmation unless explicitly shown as watch-only',
+    opening_volatility_gate: 'during the first 20 regular-session minutes, require stronger message evidence, catalyst/social support, and a tighter pre-signal move so open-spike reversals do not promote as entry-ready',
     ohlc_note: 'v11 promotes the 120m / C=0.38 guarded threshold from the final Mongo OHLC sweep and keeps float-aware squeeze/overextension/evidence controls; exit mechanics are policy metadata for bracket planning and monitoring',
   },
   candidateRule: {
@@ -27,6 +28,10 @@ export const PREDICTION_THRESHOLD_POLICY = {
     minTrailing60Messages: 3,
     minSignalChangePct: 0,
     maxSignalChangePct: 12,
+    openingVolatilityGuardMinutes: 20,
+    openingMaxPreSignalReturn60mPct: 1.5,
+    openingMinTrailing60MessagesMultiplier: 1.5,
+    openingMaxSignalAbsChangePct: 8,
     exitStrategy: 'partial_profit_then_profit_giveback_runner',
     partialExitFraction: 0.5,
     partialProfitTargetPct: 5,
@@ -371,6 +376,35 @@ export function positiveSocialSupport(row = {}, minDelta = 1) {
     (socialBullBearDelta(row) >= minDelta || Number(row.social_sentiment || row.sentiment || 0) >= 0.12)
 }
 
+function signalMinuteOfDayEt(row = {}) {
+  const rawSec = row.threshold_feature_snapshot_sec ?? row.thresholdFeatureSnapshotSec ?? row.latest_signal_epoch ?? row.signal_epoch
+  const sec = Number(rawSec)
+  if (Number.isFinite(sec) && sec > 0) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).formatToParts(new Date(sec * 1000))
+      const hour = Number(parts.find(part => part.type === 'hour')?.value)
+      const minute = Number(parts.find(part => part.type === 'minute')?.value)
+      if (Number.isFinite(hour) && Number.isFinite(minute)) return (hour % 24) * 60 + minute
+    } catch {
+      // Fall through to string-based fields.
+    }
+  }
+
+  const rawTime = row.threshold_feature_minute ?? row.signal_minute ?? row.corr_minute ?? row.entry_time
+  const match = typeof rawTime === 'string' ? rawTime.match(/(\d{1,2}):(\d{2})/) : null
+  if (match) {
+    const hour = Number(match[1])
+    const minute = Number(match[2])
+    if (Number.isFinite(hour) && Number.isFinite(minute)) return (hour % 24) * 60 + minute
+  }
+  return null
+}
+
 export function thresholdGuardEvaluation(row = {}, profile = {}, baseMinTrailing60Messages = 0) {
   const floatBucket = predictionFloatBucket(row)
   const tier = predictionMarketCapTier(row)
@@ -381,7 +415,9 @@ export function thresholdGuardEvaluation(row = {}, profile = {}, baseMinTrailing
   const tierGate = tier === 'Nano' ? gates.nano : tier === 'Small' ? gates.small : {}
   const activeGate = { ...tierGate, ...floatGate }
   const requiredTrailingMessages = Math.max(baseMinTrailing60Messages, Number(activeGate.minTrailing60Messages || 0))
+  const trailing60Messages = nullableNumber(row.threshold_trailing_60m_messages ?? row.trailing_60m_messages ?? row.trailing60Messages)
   const activeChange = Number(row.change_pct || 0)
+  const pre60 = nullableNumber(row.threshold_pre_return_60m_pct ?? row.pre_signal_return_60m_pct ?? row.pre_return_60m_pct)
   const absChange = Math.abs(activeChange)
   const capByFloat = profile.maxSignalAbsChangePctByFloatBucket || {}
   const maxAbsChange = Number(capByFloat[floatBucket] ?? profile.maxSignalAbsChangePct ?? 30)
@@ -401,12 +437,34 @@ export function thresholdGuardEvaluation(row = {}, profile = {}, baseMinTrailing
   const minSignalChangeOk = minSignalChange == null || !Number.isFinite(minSignalChange) || activeChange >= minSignalChange
   const maxSignalChangeOk = maxSignalChange == null || !Number.isFinite(maxSignalChange) || activeChange <= maxSignalChange
   const signalChangeBandOk = minSignalChangeOk && maxSignalChangeOk
+  const signalMinuteEt = signalMinuteOfDayEt(row)
+  const marketOpenMinuteEt = 9 * 60 + 30
+  const openingGuardMinutes = Math.max(0, Number(profile.openingVolatilityGuardMinutes || 0))
+  const minutesSinceOpen = signalMinuteEt == null ? null : signalMinuteEt - marketOpenMinuteEt
+  const inOpeningVolatilityGuard = minutesSinceOpen != null && minutesSinceOpen >= 0 && minutesSinceOpen < openingGuardMinutes
+  const openingRequiredMessages = Math.ceil(requiredTrailingMessages * Math.max(1, Number(profile.openingMinTrailing60MessagesMultiplier || 1)))
+  const openingMaxPre60 = Number(profile.openingMaxPreSignalReturn60mPct ?? profile.maxPreSignalReturn60mPct ?? Infinity)
+  const openingMaxAbsChange = Number(profile.openingMaxSignalAbsChangePct ?? maxAbsChange)
+  const openingMessageOk = trailing60Messages == null || trailing60Messages >= openingRequiredMessages
+  const openingPreMoveOk = pre60 == null || !Number.isFinite(openingMaxPre60) || pre60 <= openingMaxPre60
+  const openingAbsMoveOk = !Number.isFinite(openingMaxAbsChange) || openingMaxAbsChange <= 0 || absChange <= openingMaxAbsChange
+  const openingEvidenceOk = hasCatalyst || socialOk || shortOk
+  const openingVolatilityOk = !inOpeningVolatilityGuard ||
+    (openingMessageOk && openingPreMoveOk && openingAbsMoveOk && openingEvidenceOk)
   const rejectionReasons = []
   if (!overextensionOk) rejectionReasons.push(`overextended_${absChange.toFixed(2)}pct_gt_${maxAbsChange}pct_${floatBucket}`)
   if (!minSignalChangeOk) rejectionReasons.push(`active_move_${activeChange.toFixed(2)}pct_lt_${minSignalChange}pct`)
   if (!maxSignalChangeOk) rejectionReasons.push(`active_move_${activeChange.toFixed(2)}pct_gt_${maxSignalChange}pct`)
   if (!evidenceOk) rejectionReasons.push(`${floatBucketLabel(floatBucket).replace(/\s+/g, '_')}_${tier.toLowerCase()}_needs_catalyst_positive_social_or_short_interest`)
   if (!relVolumeOk) rejectionReasons.push(`${floatBucketLabel(floatBucket).replace(/\s+/g, '_')}_needs_rel_volume_${minRelVolume}`)
+  if (!openingVolatilityOk) {
+    const misses = []
+    if (!openingMessageOk) misses.push(`messages_${trailing60Messages ?? 'missing'}_lt_${openingRequiredMessages}`)
+    if (!openingPreMoveOk) misses.push(`pre60_${pre60 ?? 'missing'}_gt_${openingMaxPre60}`)
+    if (!openingAbsMoveOk) misses.push(`active_abs_${absChange.toFixed(2)}pct_gt_${openingMaxAbsChange}pct`)
+    if (!openingEvidenceOk) misses.push('needs_catalyst_social_or_short_interest')
+    rejectionReasons.push(`opening_volatility_guard_${minutesSinceOpen}m_after_open_${misses.join('_')}`)
+  }
   return {
     floatBucket,
     floatBucketLabel: floatBucketLabel(floatBucket),
@@ -414,6 +472,7 @@ export function thresholdGuardEvaluation(row = {}, profile = {}, baseMinTrailing
     lowFloat,
     tier,
     requiredTrailingMessages,
+    trailing60Messages,
     minSignalChangePct: Number.isFinite(minSignalChange) ? minSignalChange : null,
     maxSignalChangePct: Number.isFinite(maxSignalChange) ? maxSignalChange : null,
     activeSignalChangePct: Number(activeChange.toFixed(3)),
@@ -428,13 +487,21 @@ export function thresholdGuardEvaluation(row = {}, profile = {}, baseMinTrailing
     floatShortPct: floatShort || null,
     socialBullBearDelta: socialBullBearDelta(row),
     catalystCount: catalystCount(row),
+    signalMinuteEt,
+    minutesSinceRegularOpen: minutesSinceOpen,
+    inOpeningVolatilityGuard,
+    openingGuardMinutes,
+    openingRequiredTrailingMessages: inOpeningVolatilityGuard ? openingRequiredMessages : null,
+    openingMaxPreSignalReturn60mPct: inOpeningVolatilityGuard ? openingMaxPre60 : null,
+    openingMaxSignalAbsChangePct: inOpeningVolatilityGuard ? openingMaxAbsChange : null,
     overextensionOk,
     minSignalChangeOk,
     maxSignalChangeOk,
     signalChangeBandOk,
     evidenceOk,
     relVolumeOk,
-    passed: overextensionOk && signalChangeBandOk && evidenceOk && relVolumeOk,
+    openingVolatilityOk,
+    passed: overextensionOk && signalChangeBandOk && evidenceOk && relVolumeOk && openingVolatilityOk,
     rejectionReasons,
   }
 }
@@ -459,6 +526,10 @@ export function predictionThresholdProfile(row = {}, profileOverride = null) {
     maxSignalAbsChangePctByFloatBucket: override.maxSignalAbsChangePctByFloatBucket ?? baseProfile.maxSignalAbsChangePctByFloatBucket,
     minSignalChangePct: override.minSignalChangePct ?? baseProfile.minSignalChangePct,
     maxSignalChangePct: override.maxSignalChangePct ?? baseProfile.maxSignalChangePct,
+    openingVolatilityGuardMinutes: override.openingVolatilityGuardMinutes ?? baseProfile.openingVolatilityGuardMinutes,
+    openingMaxPreSignalReturn60mPct: override.openingMaxPreSignalReturn60mPct ?? baseProfile.openingMaxPreSignalReturn60mPct,
+    openingMinTrailing60MessagesMultiplier: override.openingMinTrailing60MessagesMultiplier ?? baseProfile.openingMinTrailing60MessagesMultiplier,
+    openingMaxSignalAbsChangePct: override.openingMaxSignalAbsChangePct ?? baseProfile.openingMaxSignalAbsChangePct,
     minRelVolumeByFloatBucket: override.minRelVolumeByFloatBucket ?? baseProfile.minRelVolumeByFloatBucket,
     floatEvidenceGates: override.floatEvidenceGates ?? baseProfile.floatEvidenceGates,
   }
@@ -522,9 +593,11 @@ export function evaluatePredictionEntryThreshold(row = {}, featuresOrOverride = 
                   ? 'float_or_tier_evidence_rejected'
                   : crossed && !guard.relVolumeOk
                     ? 'high_float_liquidity_rejected'
-                    : passed
-                      ? 'entry_passed'
-                      : 'entry_not_crossed'
+                    : crossed && !guard.openingVolatilityOk
+                      ? 'opening_volatility_rejected'
+                      : passed
+                        ? 'entry_passed'
+                        : 'entry_not_crossed'
   const setupStatus = !hasCorr || !hasPrev
     ? 'missing_price_density_correlation_history'
     : !hasPre60
@@ -541,6 +614,8 @@ export function evaluatePredictionEntryThreshold(row = {}, featuresOrOverride = 
                 ? 'low_message_density_rejected'
                 : status === 'active_momentum_band_rejected'
                   ? 'active_momentum_band_rejected'
+                  : status === 'opening_volatility_rejected'
+                    ? 'opening_volatility_rejected'
                   : 'inactive'
   const setupScore = setupStatus === 'entry_passed'
     ? 100
@@ -562,6 +637,8 @@ export function evaluatePredictionEntryThreshold(row = {}, featuresOrOverride = 
             ? `Active momentum band rejected: active move was ${guard.activeSignalChangePct}%, outside the ${guard.minSignalChangePct ?? '-inf'}% to ${guard.maxSignalChangePct ?? '+inf'}% v11 range.`
             : setupStatus === 'entry_passed'
               ? `Entry passed: correlation crossed above ${profile.thresholdC}, prior 60m move was ${pre60.toFixed(2)}%, and trailing messages met the ${minTrailing60Messages} minimum.`
+              : setupStatus === 'opening_volatility_rejected'
+                ? `Opening volatility rejected: signal formed ${guard.minutesSinceRegularOpen} minutes after 9:30 ET and failed the stricter open guard.`
               : `Inactive: ${profile.windowMinutes}m corr(price,density) ${prevCorr.toFixed(3)} -> ${corr.toFixed(3)} has not formed an entry setup.`
     : 'Setup diagnostics require current/previous rolling corr(price,density), prior 60m price return, and trailing 60m message count.'
 
@@ -582,6 +659,15 @@ export function evaluatePredictionEntryThreshold(row = {}, featuresOrOverride = 
     maxSignalChangePct: guard.maxSignalChangePct,
     activeSignalChangePct: guard.activeSignalChangePct,
     signalChangeBandOk: guard.signalChangeBandOk,
+    openingVolatilityOk: guard.openingVolatilityOk,
+    openingVolatilityGuard: {
+      active: guard.inOpeningVolatilityGuard,
+      minutes_since_regular_open: guard.minutesSinceRegularOpen,
+      guard_minutes: guard.openingGuardMinutes,
+      required_trailing_messages: guard.openingRequiredTrailingMessages,
+      max_pre_signal_return_60m_pct: guard.openingMaxPreSignalReturn60mPct,
+      max_signal_abs_change_pct: guard.openingMaxSignalAbsChangePct,
+    },
     maxSignalAbsChangePct: guard.maxSignalAbsChangePct,
     activeSignalAbsChangePct: guard.activeSignalAbsChangePct,
     floatBucket: guard.floatBucket,
@@ -605,7 +691,7 @@ export function evaluatePredictionEntryThreshold(row = {}, featuresOrOverride = 
     trailingStopPct: profile.trailingStopPct,
     protectiveStopPct: profile.protectiveStopPct,
     reason: hasCorr && hasPrev && hasPre60
-      ? `${profile.windowMinutes}m corr(price,density) ${prevCorr.toFixed(3)} -> ${corr.toFixed(3)}; required cross above ${profile.thresholdC}; prior 60m move ${pre60.toFixed(2)}% must be <= ${profile.maxPreSignalReturn60mPct}%; trailing 60m messages ${hasTrailing60Messages ? trailing60Messages : 'missing'} must be >= ${minTrailing60Messages}; active move ${guard.activeSignalChangePct}% must be between ${guard.minSignalChangePct ?? '-inf'}% and ${guard.maxSignalChangePct ?? '+inf'}% and abs move ${guard.activeSignalAbsChangePct}% must be <= ${guard.maxSignalAbsChangePct}% for ${guard.floatBucketLabel}; evidence gate ${guard.evidenceOk ? 'passed' : `failed (${guard.rejectionReasons.join(', ')})`}.`
+      ? `${profile.windowMinutes}m corr(price,density) ${prevCorr.toFixed(3)} -> ${corr.toFixed(3)}; required cross above ${profile.thresholdC}; prior 60m move ${pre60.toFixed(2)}% must be <= ${profile.maxPreSignalReturn60mPct}%; trailing 60m messages ${hasTrailing60Messages ? trailing60Messages : 'missing'} must be >= ${minTrailing60Messages}; active move ${guard.activeSignalChangePct}% must be between ${guard.minSignalChangePct ?? '-inf'}% and ${guard.maxSignalChangePct ?? '+inf'}% and abs move ${guard.activeSignalAbsChangePct}% must be <= ${guard.maxSignalAbsChangePct}% for ${guard.floatBucketLabel}; opening guard ${guard.inOpeningVolatilityGuard ? (guard.openingVolatilityOk ? 'passed' : `failed (${guard.rejectionReasons.join(', ')})`) : 'not active'}; evidence gate ${guard.evidenceOk ? 'passed' : `failed (${guard.rejectionReasons.join(', ')})`}.`
       : 'Candidate threshold requires current/previous rolling corr(price,density), prior 60m price return, and trailing 60m message count; one or more inputs are unavailable.',
   }
 }

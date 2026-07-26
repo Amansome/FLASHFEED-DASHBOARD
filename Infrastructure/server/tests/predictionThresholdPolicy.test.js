@@ -50,6 +50,24 @@ test('active momentum band rejects otherwise valid crosses', () => {
   assert.ok(result.rejectionReasons.some(reason => reason.includes('active_move_18.00pct_gt_12pct')))
 })
 
+test('opening volatility guard rejects fragile early regular-session crosses', () => {
+  const earlyOpenRow = {
+    ...baseRow,
+    threshold_feature_snapshot_sec: Date.UTC(2026, 6, 24, 13, 35, 0) / 1000, // 09:35 ET
+    article_count: 0,
+    message_count: 0,
+    social_sentiment: 0,
+    threshold_pre_return_60m_pct: 2.2,
+    threshold_trailing_60m_messages: 4,
+  }
+  const result = evaluatePredictionEntryThreshold(earlyOpenRow)
+  assert.equal(result.passed, false)
+  assert.equal(result.status, 'opening_volatility_rejected')
+  assert.equal(result.openingVolatilityGuard.active, true)
+  assert.equal(result.openingVolatilityGuard.minutes_since_regular_open, 5)
+  assert.ok(result.rejectionReasons.some(reason => reason.includes('opening_volatility_guard_5m_after_open')))
+})
+
 test('ultra-low and nano rows require stronger evidence and message count', () => {
   const nanoRow = {
     ...baseRow,

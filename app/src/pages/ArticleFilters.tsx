@@ -1,5 +1,6 @@
 'use client'
 import { useState } from 'react'
+import { useTickerDatalistOptions } from '@/lib/useTickerUniverse'
 
 interface Props {
   filters: Record<string, string>
@@ -8,6 +9,7 @@ interface Props {
 
 export function ArticleFilters({ filters, onChange }: Props) {
   const [open, setOpen] = useState(false)
+  const tickerOptions = useTickerDatalistOptions(filters.ticker || '')
 
   const setFilter = (key: string, value: string) => {
     if (value) onChange({ ...filters, [key]: value })
@@ -37,7 +39,12 @@ export function ArticleFilters({ filters, onChange }: Props) {
           <FilterSelect label="Sentiment" k="sentiment" options={['bullish','bearish','neutral']} filters={filters} setFilter={setFilter} />
           <FilterSelect label="Article Type" k="article_kind" options={['structured','public','filings']} filters={filters} setFilter={setFilter} />
           <FilterInput label="Source" k="source" filters={filters} setFilter={setFilter} placeholder="e.g. PR Newswire" />
-          <FilterInput label="Ticker" k="ticker" filters={filters} setFilter={setFilter} placeholder="e.g. AAPL" />
+          <FilterInput label="Ticker" k="ticker" filters={filters} setFilter={setFilter} placeholder="e.g. AAPL" datalistId="news-filter-ticker-universe" />
+          <datalist id="news-filter-ticker-universe">
+            {tickerOptions.map(row => (
+              <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+            ))}
+          </datalist>
           <FilterInput label="Search" k="search" filters={filters} setFilter={setFilter} placeholder="keyword..." />
         </div>
       )}
@@ -61,12 +68,13 @@ function FilterSelect({ label, k, options, filters, setFilter }: any) {
   )
 }
 
-function FilterInput({ label, k, filters, setFilter, placeholder }: any) {
+function FilterInput({ label, k, filters, setFilter, placeholder, datalistId }: any) {
   return (
     <div>
       <label className="label block mb-1">{label}</label>
       <input
         value={filters[k] ?? ''}
+        list={datalistId}
         onChange={e => setFilter(k, e.target.value)}
         placeholder={placeholder}
         className="w-full bg-bg border border-border text-sm text-neutral rounded px-2 py-1.5 focus:outline-none focus:border-accent placeholder:text-slate-600"

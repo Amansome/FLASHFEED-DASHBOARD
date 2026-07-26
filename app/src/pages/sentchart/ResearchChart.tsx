@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Chart from 'chart.js/auto'
 import zoomPlugin from 'chartjs-plugin-zoom'
-import { smoothSame, trailingCount, ROLL_WINDOW_DEFAULT } from './chartAgg'
+import { trailingCount, trailingWeightedAverage, ROLL_WINDOW_DEFAULT } from './chartAgg'
 
 // Registered here rather than in a global chart bootstrap: ResearchChart is the
 // only Chart.js consumer in the app, and the plugin is inert on any chart that
@@ -28,7 +28,7 @@ type Win = 'full' | '2h' | '1h'
 interface SocialData {
   labels: string[]; density: number[]; density_smooth: number[]
   sent_labels: string[]; scores: number[]; scores_smooth: number[]
-  win_density: number[]; win_density_smooth: number[]
+  win_density: number[]; win_density_smooth: number[]; sentiment_weights?: number[]; win_sentiment?: number[]; win_sentiment_smooth?: number[]
   roll_window?: number
   messages: number; bullish: number; bearish: number
   source?: string; complete?: boolean; coverage_start?: string
@@ -136,8 +136,8 @@ const hiLoPlugin = {
 // afterBuildTicks + ticks.callback — and the array is never rewritten.
 
 const AXIS_TICK_COLOR = '#cbd5e1'   // slate-300, ~12:1 on --bg #0F172A (was #4e5567, ~2.4:1)
-const AXIS_TICK_SIZE = 11           // was 8
-const AXIS_TITLE_SIZE = 10
+const AXIS_TICK_SIZE = 12           // was 8
+const AXIS_TITLE_SIZE = 11
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
@@ -180,8 +180,18 @@ function xScale(labels: string[], d: PriceData): any {
   return {
     grid: { color: '#1e2330' },
     ticks: {
-      color: AXIS_TICK_COLOR,
-      font: { size: AXIS_TICK_SIZE },
+      color(ctx: any) {
+        const label = labels[ctx.tick?.value as number]
+        if (label === '09:30') return '#fb7185'
+        if (label === '16:00') return '#a78bfa'
+        if (label === '20:00' || label === '00:00' || label === '04:00') return '#7dd3fc'
+        return AXIS_TICK_COLOR
+      },
+      font(ctx: any) {
+        const label = labels[ctx.tick?.value as number]
+        const keyTime = label === '09:30' || label === '16:00' || label === '20:00'
+        return { size: keyTime ? AXIS_TICK_SIZE + 1 : AXIS_TICK_SIZE, weight: keyTime ? '700' : '500' }
+      },
       // afterBuildTicks has already chosen a clean, non-overlapping set;
       // autoSkip would re-thin it and break the boundary snapping.
       autoSkip: false,
@@ -197,6 +207,7 @@ function xScale(labels: string[], d: PriceData): any {
         return day ? [label, day] : label
       },
     },
+    title: { display: true, text: 'ET time', color: '#7dd3fc', font: { size: AXIS_TITLE_SIZE, weight: '700' } },
     // Zoom-aware: axis.min/max are the current visible index bounds, which
     // chartjs-plugin-zoom updates on wheel/pan, so the granularity re-derives
     // itself on every frame (hourly zoomed out -> per-minute zoomed all the way in).
@@ -325,14 +336,15 @@ function buildConfig(
 
   if (mode === 'sent') {
     const raw    = labels.map(atMap(mapBy(social.sent_labels, social.scores)))
-    const smooth = labels.map(atMap(mapBy(social.sent_labels, social.scores_smooth)))
+    const rollingSentiment = trailingWeightedAverage(social.scores || [], social.sentiment_weights || social.win_density || social.density || [], windowMin)
+    const smooth = labels.map(atMap(mapBy(social.sent_labels, rollingSentiment)))
     return {
       type: 'line',
       data: { labels, datasets: [
         { label: 'Raw score', data: raw, yAxisID: 'ys', spanGaps: true,
           borderColor: 'rgba(160,160,160,.4)', borderWidth: .6, tension: 0, pointRadius: 0,
           fill: { target: 'origin', above: 'rgba(76,175,80,.2)', below: 'rgba(244,67,54,.2)' } },
-        { label: '15-min smoothed score', data: smooth, yAxisID: 'ys', spanGaps: true,
+        { label: windowMin <= 1 ? 'Rolling 1-min weighted sentiment' : `Rolling ${windowMin}-min weighted sentiment`, data: smooth, yAxisID: 'ys', spanGaps: true,
           borderColor: '#4CAF50', borderWidth: 2, tension: .1, pointRadius: 0 },
       ] },
       plugins: [marketLinesPlugin, zeroLinePlugin],
@@ -353,7 +365,8 @@ function buildConfig(
   // mode === 'ds'
   const dens   = labels.map(atMap(mapBy(social.sent_labels, social.win_density)))
   const densSm = labels.map(atMap(mapBy(social.sent_labels, social.win_density_smooth)))
-  const smooth = labels.map(atMap(mapBy(social.sent_labels, social.scores_smooth)))
+  const rollingSentiment = trailingWeightedAverage(social.scores || [], social.sentiment_weights || social.win_density || social.density || [], windowMin)
+  const smooth = labels.map(atMap(mapBy(social.sent_labels, rollingSentiment)))
   const maxDen = Math.max(...social.win_density, 1)
   return {
     type: 'line',
@@ -362,7 +375,7 @@ function buildConfig(
         backgroundColor: 'rgba(33,150,243,.3)', borderWidth: 0, barPercentage: 1, categoryPercentage: 1 },
       { label: `${social.roll_window ?? ROLL_WINDOW_DEFAULT}-min avg density`, data: densSm, yAxisID: 'y1', spanGaps: true,
         borderColor: '#2196F3', borderWidth: 1.8, tension: .1, pointRadius: 0 },
-      { label: 'Sentiment score (smoothed)', data: smooth, yAxisID: 'ys', spanGaps: true,
+      { label: `${windowMin}-min weighted sentiment`, data: smooth, yAxisID: 'ys', spanGaps: true,
         borderColor: '#FF5722', borderWidth: 2, tension: .1, pointRadius: 0,
         fill: { target: 'origin', above: 'rgba(76,175,80,.12)', below: 'rgba(244,67,54,.12)' } },
     ] },
@@ -421,6 +434,49 @@ export function ResearchChart({ ticker, mode, window: win, date, zoomResetRef, o
   const zoomStateRef = useRef<{ min: number; max: number } | null>(null)
 
   const destroyChart = () => { if (chartRef.current) { chartRef.current.destroy(); chartRef.current = null } }
+
+  const setXRange = (min: number, max: number) => {
+    const chart = chartRef.current as any
+    if (!chart?.scales?.x) return
+    const last = Math.max(0, (chart.data?.labels?.length || 1) - 1)
+    const span = Math.max(10, max - min)
+    let nextMin = Math.max(0, min)
+    let nextMax = Math.min(last, nextMin + span)
+    if (nextMax >= last) nextMin = Math.max(0, last - span)
+    chart.zoomScale('x', { min: nextMin, max: nextMax }, 'none')
+    zoomStateRef.current = { min: nextMin, max: nextMax }
+    onZoomedChange?.(chart.isZoomedOrPanned?.() || nextMin > 0 || nextMax < last)
+  }
+
+  const zoomX = (factor: number) => {
+    const chart = chartRef.current as any
+    const x = chart?.scales?.x
+    if (!x) return
+    const last = Math.max(0, (chart.data?.labels?.length || 1) - 1)
+    const min = Number.isFinite(x.min) ? x.min : 0
+    const max = Number.isFinite(x.max) ? x.max : last
+    const center = (min + max) / 2
+    const nextSpan = Math.min(last, Math.max(10, (max - min) / factor))
+    setXRange(center - nextSpan / 2, center + nextSpan / 2)
+  }
+
+  const panX = (direction: -1 | 1) => {
+    const chart = chartRef.current as any
+    const x = chart?.scales?.x
+    if (!x) return
+    const min = Number.isFinite(x.min) ? x.min : 0
+    const max = Number.isFinite(x.max) ? x.max : Math.max(0, (chart.data?.labels?.length || 1) - 1)
+    const shift = Math.max(5, (max - min) * 0.35)
+    setXRange(min + direction * shift, max + direction * shift)
+  }
+
+  const resetZoom = () => {
+    const chart = chartRef.current as any
+    if (!chart) return
+    zoomStateRef.current = null
+    chart.resetZoom()
+    onZoomedChange?.(false)
+  }
 
   // Fetch + poll only. Re-runs when ticker / mode / price-window change — never
   // on the rolling-window slider, so dragging the slider hits no backend.
@@ -486,13 +542,7 @@ export function ResearchChart({ ticker, mode, window: win, date, zoomResetRef, o
         ;(chart as any).zoomScale('x', { min: saved.min, max: saved.max }, 'none')
       }
       if (zoomResetRef) {
-        zoomResetRef.current = mode === 'pd'
-          ? () => {
-              zoomStateRef.current = null
-              ;(chart as any).resetZoom()
-              onZoomedChange?.(false)
-            }
-          : null
+        zoomResetRef.current = mode === 'pd' ? resetZoom : null
       }
       onZoomedChange?.(mode === 'pd' && !!saved)
     }, 40)
@@ -513,17 +563,29 @@ export function ResearchChart({ ticker, mode, window: win, date, zoomResetRef, o
         <span className="text-[11px] text-neutral">{status}</span>
       </div>
       {mode === 'pd' && (
-        <div className="px-3 py-2 border-b border-border flex items-center gap-3">
+        <div className="px-3 py-2 border-b border-border flex flex-wrap items-center gap-3">
           <label htmlFor="pd-window" className="text-[11px] text-neutral whitespace-nowrap">
             Rolling window: <span className="text-white font-medium tabular-nums">{windowMin} min</span>
           </label>
           <input
             id="pd-window" type="range" min={WIN_MIN} max={WIN_MAX} step={1} value={windowMin}
             onChange={e => setWindowMin(Number(e.target.value))}
-            className="flex-1 accent-orange-500 cursor-pointer"
+            className="min-w-[220px] flex-1 accent-orange-500 cursor-pointer"
             aria-label="Density rolling window in minutes"
           />
-          <span className="text-[10px] text-neutral whitespace-nowrap">scroll to zoom · drag to pan</span>
+          <div className="flex items-center gap-1">
+            <button type="button" onClick={() => panX(-1)} title="Pan left"
+              className="h-7 w-8 rounded border border-border text-xs text-sky-200 hover:border-accent hover:text-white">{"<"}</button>
+            <button type="button" onClick={() => zoomX(1 / 1.35)} title="Zoom out"
+              className="h-7 w-8 rounded border border-border text-sm text-sky-200 hover:border-accent hover:text-white">-</button>
+            <button type="button" onClick={() => zoomX(1.35)} title="Zoom in"
+              className="h-7 w-8 rounded border border-border text-sm text-sky-200 hover:border-accent hover:text-white">+</button>
+            <button type="button" onClick={() => panX(1)} title="Pan right"
+              className="h-7 w-8 rounded border border-border text-xs text-sky-200 hover:border-accent hover:text-white">{">"}</button>
+            <button type="button" onClick={resetZoom} title="Reset zoom"
+              className="h-7 rounded border border-border px-2 text-[11px] text-neutral hover:border-accent hover:text-white">Reset</button>
+          </div>
+          <span className="text-[10px] text-neutral whitespace-nowrap">scroll/pinch zoom · drag pan</span>
         </div>
       )}
       <div className="flex-1 min-h-0 p-2">

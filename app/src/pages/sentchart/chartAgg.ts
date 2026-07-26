@@ -14,13 +14,17 @@ export interface BollingerBands { upper: LinePoint[]; lower: LinePoint[] }
 // Social payload subset we read (from /api/sentchart/chart/social — see ResearchChart).
 export interface SocialSeries {
   labels: string[]; density: number[]
-  sent_labels: string[]; scores_smooth: number[]
+  density_per_minute?: number[]
+  sent_labels: string[]; scores?: number[]; scores_smooth: number[]; sentiment_weights?: number[]; win_density?: number[]
+  times?: number[]
+  sent_times?: number[]
   roll_window?: number
 }
 
-// Default density rolling window (minutes) when the server payload doesn't say
-// (mirrors the chart-service's DISPLAY_ROLL_WINDOW / CHART_ROLL_WINDOW env var).
-export const ROLL_WINDOW_DEFAULT = 360
+// Default display rolling window (minutes) when the server payload doesn't say.
+// Entry/exit strategy math still owns its 360m correlation horizon separately;
+// the professor-facing Price + Density display defaults to 240m.
+export const ROLL_WINDOW_DEFAULT = 240
 
 // CENTERED k-wide mean with zero padding at the edges (np.convolve
 // mode='same' port of the backend's _smooth_same), skipping smoothing when
@@ -37,11 +41,32 @@ export const ROLL_WINDOW_DEFAULT = 360
 export function trailingCount(values: number[], k: number): number[] {
   const n = values.length
   const out: number[] = []
-  let s = 0
-  for (let i = 0; i < n; i++) {
-    s += values[i]
-    if (i - k - 1 >= 0) s -= values[i - k - 1]   // window [i-k, i]: k+1 slots
-    out.push(s)
+  let sum = 0
+  const window = Math.max(1, Math.round(k))
+  for (let i = 0; i < n; i += 1) {
+    sum += Number(values[i] || 0)
+    if (i - window - 1 >= 0) sum -= Number(values[i - window - 1] || 0)
+    out.push(sum)
+  }
+  return out
+}
+
+export function trailingWeightedAverage(values: number[], weights: number[], k: number): number[] {
+  const out: number[] = []
+  let weighted = 0
+  let totalWeight = 0
+  const window = Math.max(1, Math.round(k))
+  for (let i = 0; i < values.length; i += 1) {
+    const w = Number(weights[i] || 0)
+    const v = Number(values[i] || 0)
+    weighted += v * w
+    totalWeight += w
+    if (i - window - 1 >= 0) {
+      const oldW = Number(weights[i - window - 1] || 0)
+      weighted -= Number(values[i - window - 1] || 0) * oldW
+      totalWeight -= oldW
+    }
+    out.push(totalWeight > 0 ? Number((weighted / totalWeight).toFixed(4)) : 0)
   }
   return out
 }
@@ -172,10 +197,9 @@ function etLabel(timeSec: number): string {
 
 // Build density / sentiment overlay lines aligned to the SAME timeframe buckets
 // as resampleCandles(rawCandles, tfMin). Density is the trailing windowMin-min
-// message COUNT (mirrors the research view's orange line);
-// sentiment is the server's 15-min-smoothed score. Each bucket value is the mean
-// of the per-minute smoothed values over the minutes it spans, so the overlays
-// stay registered to the candle x-axis at any timeframe.
+// message COUNT; sentiment is the message-weighted trailing sentiment over that
+// same window. Each bucket value is the mean of the per-minute rolling values
+// over the minutes it spans, so the overlays stay registered to the candle x-axis.
 export function overlaySeries(
   rawCandles: Candle[],
   social: SocialSeries | null,
@@ -184,29 +208,58 @@ export function overlaySeries(
 ): { density: LinePoint[]; sentiment: LinePoint[] } {
   if (!social || !rawCandles.length) return { density: [], sentiment: [] }
 
-  const densSmooth = trailingCount(social.density || [], windowMin)
-  const densByLabel = new Map<string, number>()
-  ;(social.labels || []).forEach((l, i) => densByLabel.set(l, densSmooth[i]))
-  const sentByLabel = new Map<string, number>()
-  ;(social.sent_labels || []).forEach((l, i) => sentByLabel.set(l, (social.scores_smooth || [])[i]))
+  const candleBuckets = Array.from(new Set(
+    rawCandles
+      .map(c => bucketStart(Number(c.time), tfMin))
+      .filter(t => Number.isFinite(t)),
+  )).sort((a, b) => a - b)
+  const minTime = Number(candleBuckets[0] ?? 0) - tfMin * 60
+  const maxTime = Number(candleBuckets[candleBuckets.length - 1] ?? 0) + tfMin * 60
+  const inVisibleRange = (t: number) => Number.isFinite(t) && t >= minTime && t <= maxTime
+  const add = (acc: Map<number, { sum: number; n: number }>, time: number, value: number | undefined) => {
+    if (!Number.isFinite(time) || !Number.isFinite(value as number) || !inVisibleRange(time)) return
+    const bucket = bucketStart(time, tfMin)
+    const a = acc.get(bucket) || { sum: 0, n: 0 }
+    a.sum += value as number
+    a.n += 1
+    acc.set(bucket, a)
+  }
 
-  // Accumulate per-minute values into timeframe buckets.
+  const rawDensity = Array.isArray(social.density) ? social.density.map(v => Number(v || 0)) : []
+  const rawSentiment = social.scores?.length ? social.scores : (social.scores_smooth || [])
+  const sentimentWeights = social.sentiment_weights?.length ? social.sentiment_weights : (social.density || [])
+  const densSmooth = trailingCount(rawDensity, windowMin)
+  const sentSmooth = trailingWeightedAverage(rawSentiment, sentimentWeights, windowMin)
   const dAcc = new Map<number, { sum: number; n: number }>()
   const sAcc = new Map<number, { sum: number; n: number }>()
-  for (const c of rawCandles) {
-    const t = bucketStart(c.time, tfMin)
-    const label = etLabel(c.time)
-    if (densByLabel.has(label)) {
-      const a = dAcc.get(t) || { sum: 0, n: 0 }; a.sum += densByLabel.get(label)!; a.n++; dAcc.set(t, a)
-    }
-    if (sentByLabel.has(label)) {
-      const a = sAcc.get(t) || { sum: 0, n: 0 }; a.sum += sentByLabel.get(label)!; a.n++; sAcc.set(t, a)
+
+  if (Array.isArray(social.times) && social.times.length) {
+    social.times.forEach((t, i) => add(dAcc, Number(t), densSmooth[i]))
+  } else {
+    const densByLabel = new Map<string, number>()
+    ;(social.labels || []).forEach((l, i) => densByLabel.set(l, densSmooth[i]))
+    for (const c of rawCandles) {
+      const label = etLabel(c.time)
+      if (densByLabel.has(label)) add(dAcc, c.time, densByLabel.get(label))
     }
   }
+
+  if (Array.isArray(social.sent_times) && social.sent_times.length) {
+    social.sent_times.forEach((t, i) => add(sAcc, Number(t), sentSmooth[i]))
+  } else {
+    const sentByLabel = new Map<string, number>()
+    ;(social.sent_labels || []).forEach((l, i) => sentByLabel.set(l, sentSmooth[i] ?? (social.scores_smooth || [])[i] ?? 0))
+    for (const c of rawCandles) {
+      const label = etLabel(c.time)
+      if (sentByLabel.has(label)) add(sAcc, c.time, sentByLabel.get(label))
+    }
+  }
+
   const toLine = (acc: Map<number, { sum: number; n: number }>): LinePoint[] =>
-    Array.from(acc.entries()).filter(([, v]) => v.n > 0)
-      .map(([time, v]) => ({ time, value: +(v.sum / v.n).toFixed(4) }))
-      .sort((a, b) => a.time - b.time)
+    candleBuckets.map(time => {
+      const v = acc.get(time)
+      return { time, value: v && v.n > 0 ? Number((v.sum / v.n).toFixed(4)) : 0 }
+    })
 
   return { density: toLine(dAcc), sentiment: toLine(sAcc) }
 }
