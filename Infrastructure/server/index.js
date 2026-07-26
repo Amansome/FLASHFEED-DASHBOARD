@@ -7244,13 +7244,45 @@ app.use('/api/sentchart', async (req, res) => {
 })
 
 // ── Health check ──────────────────────────────────────────
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   const { readyState } = mongoose.connection
   const states = { 0:'disconnected', 1:'connected', 2:'connecting', 3:'disconnecting' }
+  const dbStatus = states[readyState] || 'unknown'
+  const mongoOk = readyState === 1
+
+  let redisStatus = redis ? redis.status : 'disabled'
+  let redisOk = false
+  let redisLatencyMs = null
+  if (redisReady()) {
+    const started = Date.now()
+    try {
+      const pong = await redis.ping()
+      redisOk = pong === 'PONG'
+      redisStatus = redisOk ? 'connected' : 'warning'
+      redisLatencyMs = Date.now() - started
+    } catch (err) {
+      redisStatus = 'error'
+      redisLatencyMs = Date.now() - started
+    }
+  }
+
+  const status = mongoOk && redisOk ? 'ok' : mongoOk ? 'degraded' : 'error'
   res.json({
-    status:  'ok',
-    db:      states[readyState] || 'unknown',
-    time:    new Date().toISOString(),
+    status,
+    ok: mongoOk && redisOk,
+    db: dbStatus,
+    redis: {
+      status: redisStatus,
+      ok: redisOk,
+      latency_ms: redisLatencyMs,
+      configured: Boolean(REDIS_URL),
+    },
+    services: {
+      mongo: { status: dbStatus, ok: mongoOk },
+      redis: { status: redisStatus, ok: redisOk, latency_ms: redisLatencyMs },
+    },
+    time: new Date().toISOString(),
+    uptime: process.uptime(),
   })
 })
 
