@@ -298,7 +298,12 @@ def build_chart(ticker: str, window: str, date_req: str = "") -> dict:
     if window == "full":
         try:
             import tv_overnight
-            on_bars = tv_overnight.overnight_bars(ticker, date_used)
+            # This session's Finviz closes are the reference the overnight pull
+            # is checked against — any TV bar landing in 04:00-20:00 must match
+            # Finviz at the same HH:MM, or the whole pull is discarded as
+            # misaligned. See the timezone note in tv_overnight.py.
+            session_closes = {b["ts"].strftime("%H:%M"): b["close"] for b in bars}
+            on_bars = tv_overnight.overnight_bars(ticker, date_used, session_closes)
         except Exception:
             on_bars = []
 

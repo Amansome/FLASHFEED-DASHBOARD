@@ -101,10 +101,12 @@ const hiLoPlugin = {
   afterDatasetsDraw(chart: any, _a: any, opts: any) {
     if (!opts || !opts.enabled) return
     const data: (number | null)[] = chart.data.datasets[0].data, labels: string[] = chart.data.labels
-    const skip = opts.skipBefore || 0   // synthetic overnight carry: not a real high/low
+    // Carried (non-traded) minutes are not a real high/low. Absent the flags,
+    // every point counts — the plugin is inert on charts that don't pass them.
+    const isReal: boolean[] = opts.isReal || []
     let hi = -1, lo = -1
     data.forEach((v, i) => {
-      if (v == null || i < skip) return
+      if (v == null || isReal[i] === false) return
       if (hi < 0 || v > (data[hi] as number)) hi = i
       if (lo < 0 || v < (data[lo] as number)) lo = i
     })
@@ -253,14 +255,24 @@ function buildConfig(
 
   if (mode === 'pd') {
     const prices = labels.map(atMap(mapBy(d.labels, d.prices)))
-    // Overnight price (owner request): no bars exist 20:00->04:00, so carry the
-    // PRIOR session's close flat across the gap (dashed) until the first real
-    // bar. firstReal marks where synthetic ends and real bars begin.
-    let firstReal = prices.findIndex(v => v != null)
-    if (firstReal > 0 && d.prev_close != null) {
-      for (let i = 0; i < firstReal; i++) prices[i] = d.prev_close
-    } else {
-      firstReal = Math.max(firstReal, 0)
+    // Synthetic price fill (owner request: a 24-h axis that never invents price
+    // action). Every minute without a real bar is carried FLAT from the last
+    // known price — the prior session's close before the first bar, the last
+    // real bar after it — and drawn dashed.
+    //
+    // This used to carry only a LEADING null run, and only when it started at
+    // index 1+. Two ways that failed: a gap that isn't at the start (the
+    // 20:00->04:00 overnight window whenever no overnight tape exists) fell
+    // through to spanGaps, which draws one straight line between the edges and
+    // reads as a real 4-hour trend; and a single stray bar at index 0 set
+    // firstReal to 0, which switched the carry off for the whole session.
+    // `isReal` keeps the two apart everywhere it matters: the dash segments
+    // below, and the High/Low markers, which must only ever mark traded prices.
+    const isReal = prices.map(v => v != null)
+    let carry = d.prev_close ?? null
+    for (let i = 0; i < prices.length; i++) {
+      if (prices[i] != null) carry = prices[i]
+      else if (carry != null) prices[i] = carry
     }
     const dens   = labels.map(atMap(mapBy(social.labels, social.density)))
     // Trailing rolling COUNT (owner's spec): value at minute t = total messages
@@ -279,8 +291,10 @@ function buildConfig(
       data: { labels, datasets: [
         { label: 'Close price', data: prices, yAxisID: 'y1', spanGaps: true,
           borderColor: '#2196F3', borderWidth: 1.4, tension: .1, pointRadius: 0,
-          // dashed over the synthetic overnight carry (prior session's close)
-          segment: { borderDash: (c: any) => c.p1DataIndex <= firstReal ? [4, 3] : undefined },
+          // Dashed wherever either endpoint is synthetic, so a carried stretch
+          // can never be mistaken for traded price at a glance.
+          segment: { borderDash: (c: any) =>
+            (isReal[c.p0DataIndex] && isReal[c.p1DataIndex]) ? undefined : [4, 3] },
           fill: { target: { value: pMin } }, backgroundColor: 'rgba(33,150,243,.08)' },
         { label: 'Messages/min', type: 'bar', data: dens, yAxisID: 'y2',
           backgroundColor: 'rgba(144,202,249,.75)', borderWidth: 0,
@@ -292,8 +306,8 @@ function buildConfig(
       plugins: [marketLinesPlugin, hiLoPlugin],
       options: { ...baseOpts,
         plugins: { legend,
-                   // skip the synthetic overnight carry — High/Low mark real bars only
-                   hiLo: { enabled: true, skipBefore: firstReal },
+                   // skip every synthetic minute — High/Low mark traded bars only
+                   hiLo: { enabled: true, isReal },
                    zoom: zoomOpts(onZoomChange) },
         scales: {
           x: xScale(labels, d),
