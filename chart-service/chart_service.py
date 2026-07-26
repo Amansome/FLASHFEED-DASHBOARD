@@ -454,6 +454,23 @@ def _trailing_count(values: list, k: int) -> list:
     return out
 
 
+def _trailing_weighted_average(values: list, weights: list, k: int) -> list:
+    """Trailing weighted average over the same inclusive window as
+    _trailing_count. Used for sentiment so the selected rolling window controls
+    message density and message-weighted sentiment together."""
+    out, weighted, total_weight = [], 0.0, 0.0
+    for i, v in enumerate(values):
+        w = float(weights[i] if i < len(weights) else 0.0)
+        weighted += float(v or 0.0) * w
+        total_weight += w
+        if i - k - 1 >= 0:
+            old_w = float(weights[i - k - 1] if i - k - 1 < len(weights) else 0.0)
+            weighted -= float(values[i - k - 1] or 0.0) * old_w
+            total_weight -= old_w
+        out.append(weighted / total_weight if total_weight > 0 else 0.0)
+    return out
+
+
 def _smooth_same(values: list, k: int = 15) -> list:
     """Pure-python np.convolve(values, ones(k)/k, mode='same'): centered k-wide
     mean with zero padding at the edges. Verbatim from dashboard._smooth_same;
@@ -534,8 +551,8 @@ DISPLAY_ROLL_WINDOW = int(os.environ.get("CHART_ROLL_WINDOW", "360"))
 def _build_social_series(msgs: list, date_str: str, roll_window: int = None) -> dict:
     """per-minute counts -> zero-filled timeline -> TRAILING rolling COUNT of
     messages over `roll_window` minutes (default DISPLAY_ROLL_WINDOW; owner's
-    spec — see _trailing_count); 5-min sentiment windows sliding 1 min keyed
-    by window start, sentiment score smoothing stays 15-min centered."""
+    spec — see _trailing_count); sentiment is also trailing and message-weighted
+    over that same selected window."""
     roll = max(1, min(int(roll_window or DISPLAY_ROLL_WINDOW), 960))
     win_start, win_end = social_window(date_str)
 
@@ -558,7 +575,7 @@ def _build_social_series(msgs: list, date_str: str, roll_window: int = None) -> 
         t += timedelta(minutes=1)
     density = [minute_total.get(m, 0) for m in all_minutes]
 
-    sent_labels, scores, win_density = [], [], []
+    sent_labels, sent_times, scores, win_density = [], [], [], []
     t = win_start
     while t + timedelta(minutes=5) <= win_end:
         bull = bear = total = 0
@@ -572,17 +589,23 @@ def _build_social_series(msgs: list, date_str: str, roll_window: int = None) -> 
         scores.append(round((bull - bear) / tagged, 4) if tagged else 0.0)
         win_density.append(total)
         sent_labels.append(t.strftime("%H:%M"))
+        sent_times.append(_epoch_utc(t))
         t += timedelta(minutes=1)
 
     return {
         "labels":         [m.strftime("%H:%M") for m in all_minutes],
+        "times":          [_epoch_utc(m) for m in all_minutes],
         "density":        density,
         "density_smooth": [round(v, 3) for v in _trailing_count(density, roll)],
         "sent_labels":    sent_labels,
+        "sent_times":     sent_times,
         "scores":         scores,
-        "scores_smooth":  [round(v, 4) for v in _smooth_same(scores, 15)],
+        "sentiment_weights": win_density,
+        "scores_smooth":  [round(v, 4) for v in _trailing_weighted_average(scores, win_density, roll)],
         "win_density":        win_density,
         "win_density_smooth": [round(v, 3) for v in _trailing_count(win_density, roll)],
+        "win_sentiment":       [round(v, 4) for v in _trailing_weighted_average(scores, win_density, roll)],
+        "win_sentiment_smooth": [round(v, 4) for v in _trailing_weighted_average(scores, win_density, roll)],
         "roll_window":    roll,
         "messages":       len(msgs),
         "bullish":        int(sum(minute_bull.values())),
@@ -596,9 +619,13 @@ def _build_social_series(msgs: list, date_str: str, roll_window: int = None) -> 
 # not a copy of the research scripts:
 #   ENTRY: the rolling Pearson correlation between price and per-minute message
 #          density (360-min window) CROSSES UP through `threshold` (default 0.10).
-#   EXIT : a price trailing stop — track the post-entry peak price, exit when
-#          price falls `stop_pct`% below that peak (default 30%); otherwise the
-#          position is closed at session end.
+#   EXIT : a price trailing stop OR a correlation-break exit. After entry, if
+#          the same rolling correlation falls back to/under an optional
+#          `corr_exit_threshold`, price and message density are no longer
+#          behaving together, so the simulated trade exits. By default this
+#          validation exit is off, preserving the trailing-stop strategy.
+#          Otherwise track the post-entry peak price and exit when price falls
+#          `stop_pct`% below that peak.
 #   Non-overlapping: once entered, no new entry opens until the position exits.
 #
 # Computed on a continuous 1-min ET grid [04:00, 20:00) with price FORWARD-FILLED
@@ -610,6 +637,7 @@ def _build_social_series(msgs: list, date_str: str, roll_window: int = None) -> 
 STRAT_ROLL_WINDOW = 360
 STRAT_ENTRY_THRESHOLD = 0.10
 STRAT_STOP_PCT = 30.0
+STRAT_CORR_EXIT_THRESHOLD = None
 
 
 def _epoch_utc(ts) -> int:
@@ -683,7 +711,8 @@ def _price_density_grid(msgs, bars, date_used):
     return grid, density, price, eff_bar
 
 
-def _compute_strategy_signals(ticker, bars, date_used, threshold, stop_pct, msgs=None):
+def _compute_strategy_signals(ticker, bars, date_used, threshold, stop_pct, msgs=None,
+                              corr_exit_threshold=STRAT_CORR_EXIT_THRESHOLD):
     """Run the entry/exit strategy for one session. Returns (markers, stats).
     markers: [{time, type:"entry"|"exit", price, ...}], time as candle-axis epoch.
     msgs may be pre-fetched (the exit-screener batch path reads the resting store
@@ -716,22 +745,28 @@ def _compute_strategy_signals(ticker, bars, date_used, threshold, stop_pct, msgs
             i += 1
             continue
 
-        # hold until the price trailing stop trips, else session end
+        # Hold until either the price trailing stop trips or price/density
+        # correlation breaks down. If neither happens, close at session end.
         peak = price[i]
         exit_idx = None
+        exit_reason = None
         j = i + 1
         while j < n:
             pj = price[j]
             if pj is not None:
                 if pj > peak:
                     peak = pj
-                if pj <= peak * (1 - stop_frac):
+                price_stop_hit = pj <= peak * (1 - stop_frac)
+                corr_break_hit = (corr_exit_threshold is not None
+                                  and corr[j] is not None
+                                  and corr[j] <= corr_exit_threshold)
+                if price_stop_hit or corr_break_hit:
                     exit_idx = j
+                    exit_reason = "price_trailing_stop" if price_stop_hit else "correlation_break"
                     break
             j += 1
         if exit_idx is not None:
             exit_bar = eff_bar[exit_idx]
-            exit_reason = "price_trailing_stop"
         else:
             exit_idx = n - 1
             exit_bar = bars[-1]           # real last candle == session end
@@ -745,13 +780,15 @@ def _compute_strategy_signals(ticker, bars, date_used, threshold, stop_pct, msgs
         markers.append({"time": _epoch_utc(exit_bar["ts"]), "type": "exit",
                         "price": round(exit_bar["close"], 4),
                         "peak": round(peak, 4),
+                        "corr": round(corr[exit_idx], 4) if corr[exit_idx] is not None else None,
                         "reason": exit_reason})
         trades += 1
         i = exit_idx + 1                  # DE-OVERLAP: resume strictly after the exit
 
     stats = {"trades": trades,
              "corr_defined": sum(1 for c in corr if c is not None),
-             "messages": len(msgs)}
+             "messages": len(msgs),
+             "corr_exit_threshold": corr_exit_threshold}
     return markers, stats
 
 
@@ -861,6 +898,15 @@ def api_signals(ticker):
         stop_pct = float(request.args.get("stop_pct", STRAT_STOP_PCT))
     except (TypeError, ValueError):
         stop_pct = STRAT_STOP_PCT
+    corr_exit_raw = request.args.get("corr_exit_threshold")
+    try:
+        corr_exit_threshold = (
+            float(corr_exit_raw)
+            if corr_exit_raw not in (None, "")
+            else STRAT_CORR_EXIT_THRESHOLD
+        )
+    except (TypeError, ValueError):
+        corr_exit_threshold = STRAT_CORR_EXIT_THRESHOLD
 
     # Resolve bars/session exactly like the candle endpoint (pinned ?date or latest).
     if re.match(r"^\d{4}-\d{2}-\d{2}$", date_req):
@@ -876,7 +922,10 @@ def api_signals(ticker):
                         "markers": []})
 
     # Strategy runs on the FULL session (the 360-min warmup + non-overlap need it).
-    markers, stats = _compute_strategy_signals(ticker, bars, date_used, threshold, stop_pct)
+    markers, stats = _compute_strategy_signals(
+        ticker, bars, date_used, threshold, stop_pct,
+        corr_exit_threshold=corr_exit_threshold,
+    )
 
     # If the chart is zoomed to a 2h/1h window, only return markers inside it so
     # they line up with the visible candles (same cutoff the candle endpoint uses).
@@ -887,6 +936,7 @@ def api_signals(ticker):
     payload = {
         "ticker": ticker, "date": date_used, "window": window,
         "threshold": threshold, "stop_pct": stop_pct,
+        "corr_exit_threshold": corr_exit_threshold,
         "n": len(bars), "trades": stats["trades"],
         "corr_defined": stats["corr_defined"], "messages": stats["messages"],
         "markers": markers,
@@ -1050,7 +1100,7 @@ def api_corr_batch():
 # data — not for distribution). All strategy math here is this repo's own clean
 # reimplementation (see the STRATEGY INDICATOR section above); keep it that way.
 
-_positions_batch_cache: dict = {}   # (ticker, date_key, stop_pct, threshold) -> {"ts", "row"}
+_positions_batch_cache: dict = {}   # (ticker, date_key, stop_pct, threshold, corr_exit_threshold) -> {"ts", "row"}
 
 
 def _marker_hhmm(epoch):
@@ -1059,12 +1109,13 @@ def _marker_hhmm(epoch):
     return datetime.fromtimestamp(int(epoch), tz=timezone.utc).strftime("%H:%M")
 
 
-def _compute_positions_row(ticker, date_req, today, stop_pct, threshold, topup_budget):
+def _compute_positions_row(ticker, date_req, today, stop_pct, threshold, corr_exit_threshold, topup_budget):
     """Simulated positions for one ticker/session. Same non-blocking social-store
     handling as the corr batch: a store miss kicks a background walk and reports
     status="warming" instead of stalling the batch."""
     row = {"ticker": ticker, "date": None, "current_price": None,
            "trades": [], "messages": 0, "stop_pct": stop_pct,
+           "corr_exit_threshold": corr_exit_threshold,
            "threshold": threshold, "status": "ok"}
 
     if date_req:
@@ -1095,8 +1146,11 @@ def _compute_positions_row(ticker, date_req, today, stop_pct, threshold, topup_b
     msgs = social_store.docs_to_msgs(doc.get("messages"))
     row["messages"] = len(msgs)
 
-    markers, _stats = _compute_strategy_signals(ticker, bars, date_used,
-                                                threshold, stop_pct, msgs=msgs)
+    markers, _stats = _compute_strategy_signals(
+        ticker, bars, date_used, threshold, stop_pct,
+        msgs=msgs,
+        corr_exit_threshold=corr_exit_threshold,
+    )
     # markers arrive as strict entry/exit pairs (see _compute_strategy_signals)
     entry = None
     for m in markers:
@@ -1111,6 +1165,7 @@ def _compute_positions_row(ticker, date_req, today, stop_pct, threshold, topup_b
                 "exit_price": m["price"],
                 "exit_time": _marker_hhmm(m["time"]),
                 "exit_reason": m["reason"],
+                "exit_corr": m.get("corr"),
                 "peak_price": m.get("peak"),
                 "status": "Holding" if m["reason"] == "session_end" else "Stopped Out",
             })
@@ -1118,14 +1173,14 @@ def _compute_positions_row(ticker, date_req, today, stop_pct, threshold, topup_b
     return row
 
 
-def _positions_batch_row(ticker, date_req, today, stop_pct, threshold, topup_budget):
-    cache_key = (ticker, date_req or "latest", stop_pct, threshold)
+def _positions_batch_row(ticker, date_req, today, stop_pct, threshold, corr_exit_threshold, topup_budget):
+    cache_key = (ticker, date_req or "latest", stop_pct, threshold, corr_exit_threshold)
     hit = _positions_batch_cache.get(cache_key)
     if hit:
         ttl = _CORR_BATCH_TTL_OK if hit["row"].get("status") == "ok" else _CORR_BATCH_TTL_RETRY
         if time.time() - hit["ts"] < ttl:
             return hit["row"]
-    row = _compute_positions_row(ticker, date_req, today, stop_pct, threshold, topup_budget)
+    row = _compute_positions_row(ticker, date_req, today, stop_pct, threshold, corr_exit_threshold, topup_budget)
     _positions_batch_cache[cache_key] = {"ts": time.time(), "row": row}
     return row
 
@@ -1154,13 +1209,22 @@ def api_positions_batch():
         threshold = float(request.args.get("threshold", STRAT_ENTRY_THRESHOLD))
     except (TypeError, ValueError):
         threshold = STRAT_ENTRY_THRESHOLD
+    corr_exit_raw = request.args.get("corr_exit_threshold")
+    try:
+        corr_exit_threshold = (
+            float(corr_exit_raw)
+            if corr_exit_raw not in (None, "")
+            else STRAT_CORR_EXIT_THRESHOLD
+        )
+    except (TypeError, ValueError):
+        corr_exit_threshold = STRAT_CORR_EXIT_THRESHOLD
     today = datetime.now(EDT).strftime("%Y-%m-%d")
     topup_budget = {"left": _TOPUP_BUDGET_PER_REQUEST}
 
     results = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {pool.submit(_positions_batch_row, t, date_req, today,
-                               stop_pct, threshold, topup_budget): t
+                               stop_pct, threshold, corr_exit_threshold, topup_budget): t
                    for t in tickers}
         for fut in as_completed(futures):
             t = futures[fut]
@@ -1172,7 +1236,9 @@ def api_positions_batch():
                               "error": str(exc)}
 
     return jsonify({"date": date_req or "latest", "stop_pct": stop_pct,
-                    "threshold": threshold, "count": len(results),
+                    "threshold": threshold,
+                    "corr_exit_threshold": corr_exit_threshold,
+                    "count": len(results),
                     "results": results})
 
 

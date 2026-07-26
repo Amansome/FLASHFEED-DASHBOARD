@@ -5,9 +5,14 @@ import { useSearchParams } from 'react-router-dom'
 import useSWR from 'swr'
 import { clsx } from 'clsx'
 import * as THREE from 'three'
+import { useTickerDatalistOptions } from '@/lib/useTickerUniverse'
 
 const fetcher = (url: string) => fetch(url).then(r => r.json())
-const JOURNEY_PLAYBACK_SPEED_MULTIPLIER = 0.5625 // 75% of the prior mirror journey speed.
+const JOURNEY_PLAYBACK_SPEED_MULTIPLIER = 0.28125 // 0.5x the prior selected-journey playback speed.
+const DISPLAY_PATH_SAMPLE_SECONDS = 10 * 60
+const DISPLAY_PATH_MAX_POINTS = 44
+const MAP_FRAME_MIN = new THREE.Vector3(-8, -6, -2)
+const MAP_FRAME_MAX = new THREE.Vector3(8, 7, 8)
 
 type DecisionMapRow = {
   ticker: string
@@ -82,8 +87,8 @@ type DecisionMapRow = {
   sourceSocialWindowEnd?: string
   socialMessageDensityPerHour?: number
   newsDensityPerHour?: number
-  ticker_path?: Array<{ timestamp: number; time?: number; timestampUtc?: string; displayTime?: string; rollingWindowUsed?: string; sourceSocialWindowStart?: string; sourceSocialWindowEnd?: string; sourceNewsWindowStart?: string; sourceNewsWindowEnd?: string; chartBarTime?: string; x: number; y: number; z: number; combinedSentiment?: number; priceChangePct?: number; marketCapRelativeVolumeScore?: number | null; currentDollarVolume?: number | null; relativeVolume?: number | null; sentimentEstimated?: boolean; dataQuality?: string; missingFields?: string[]; timestampSource?: string; volumeTimeframe?: string; volumeTimeframeMinutes?: number; timeframeVolume?: number | null; expectedTimeframeVolume?: number | null; relativeVolumeBasis?: string }>
-  path_points?: Array<{ timestamp: number; time?: number; timestampUtc?: string; displayTime?: string; rollingWindowUsed?: string; sourceSocialWindowStart?: string; sourceSocialWindowEnd?: string; sourceNewsWindowStart?: string; sourceNewsWindowEnd?: string; chartBarTime?: string; x: number; y: number; z: number; combinedSentiment?: number; priceChangePct?: number; marketCapRelativeVolumeScore?: number | null; currentDollarVolume?: number | null; relativeVolume?: number | null; sentimentEstimated?: boolean; dataQuality?: string; missingFields?: string[]; timestampSource?: string; volumeTimeframe?: string; volumeTimeframeMinutes?: number; timeframeVolume?: number | null; expectedTimeframeVolume?: number | null; relativeVolumeBasis?: string }>
+  ticker_path?: Array<{ timestamp: number; time?: number; timestampUtc?: string; displayTime?: string; rollingWindowUsed?: string; sourceSocialWindowStart?: string; sourceSocialWindowEnd?: string; sourceNewsWindowStart?: string; sourceNewsWindowEnd?: string; chartBarTime?: string; x: number; y: number; z: number; combinedSentiment?: number; priceChangePct?: number; marketCapRelativeVolumeScore?: number | null; currentDollarVolume?: number | null; relativeVolume?: number | null; sentimentEstimated?: boolean; dataQuality?: string; missingFields?: string[]; timestampSource?: string; volumeTimeframe?: string; volumeTimeframeMinutes?: number; timeframeVolume?: number | null; expectedTimeframeVolume?: number | null; relativeVolumeBasis?: string; messageDensityPerHour?: number | null; socialDensityPerHour?: number | null; newsDensityPerHour?: number | null; evidenceEventCount?: number | null; evidenceWindowMinutes?: number | null }>
+  path_points?: Array<{ timestamp: number; time?: number; timestampUtc?: string; displayTime?: string; rollingWindowUsed?: string; sourceSocialWindowStart?: string; sourceSocialWindowEnd?: string; sourceNewsWindowStart?: string; sourceNewsWindowEnd?: string; chartBarTime?: string; x: number; y: number; z: number; combinedSentiment?: number; priceChangePct?: number; marketCapRelativeVolumeScore?: number | null; currentDollarVolume?: number | null; relativeVolume?: number | null; sentimentEstimated?: boolean; dataQuality?: string; missingFields?: string[]; timestampSource?: string; volumeTimeframe?: string; volumeTimeframeMinutes?: number; timeframeVolume?: number | null; expectedTimeframeVolume?: number | null; relativeVolumeBasis?: string; messageDensityPerHour?: number | null; socialDensityPerHour?: number | null; newsDensityPerHour?: number | null; evidenceEventCount?: number | null; evidenceWindowMinutes?: number | null }>
   path_direction?: 'correct_direction' | 'wrong_direction' | 'neutral' | 'insufficient_history' | string
   path_direction_score?: number
   path_color?: 'blue' | 'red' | 'gray' | string
@@ -115,6 +120,16 @@ type DecisionMapRow = {
 type SortKey = 'convictionScore' | 'activityScore' | 'relativeVolume' | 'marketCapRelativeVolumeScore' | 'liquidityScore' | 'priceChangePct' | 'combinedSentiment' | 'ticker'
 type PathPoint = NonNullable<DecisionMapRow['path_points']>[number]
 type VolumePointLike = Partial<PathPoint> & Partial<DecisionMapRow>
+type DecisionTooltip = { x: number; y: number; row: DecisionMapRow; point?: PathPoint; pointIndex?: number; compact?: boolean }
+type MiniPriceDensityPoint = { time: number; price: number; density: number }
+type MiniPriceDensity = {
+  ticker: string
+  rollingWindowMinutes: number
+  points: MiniPriceDensityPoint[]
+  priceSource?: 'chart' | 'path'
+  densitySource?: 'chart' | 'path' | 'none'
+  limitedPrice?: boolean
+}
 
 const VOLUME_TIMEFRAMES = [
   { value: '1m', label: '1m' },
@@ -331,20 +346,16 @@ function priceAxisValue(value: number) {
   return sign * (Math.log1p(raw) / Math.log1p(160)) * 4.8
 }
 
-function volumeAxisValue(point: VolumePointLike, row?: DecisionMapRow | null) {
-  // Z-axis: 1x relative volume is neutral baseline; sub-1x dips below zero and excess RelVol rises on z.
-  const relVolume = Number(point.relativeVolume ?? row?.relativeVolume)
-  if (!Number.isFinite(relVolume)) return 0
-  if (relVolume === 1) return 0
-  if (relVolume > 1) return clamp((Math.log1p(relVolume - 1) / Math.log1p(999)) * 7, 0, 7)
-  return clamp(-(Math.log1p(Math.max(0, 1 - relVolume)) / Math.log1p(1)) * 2.2, -2.2, 0)
+function volumePressureAxisValue(point: VolumePointLike, row?: DecisionMapRow | null) {
+  const pressure = volumePressurePlotScore(point, row)
+  return clamp(((pressure - 50) / 50) * 5.2, -2.2, 7)
 }
 
 function pointPosition(row: DecisionMapRow) {
   return new THREE.Vector3(
     sentimentAxisValue(row.combinedSentiment),
     priceAxisValue(row.priceChangePct),
-    volumeAxisValue(row, row),
+    volumePressureAxisValue(row, row),
   )
 }
 
@@ -353,13 +364,17 @@ function pathPointVector(point: PathPoint, row: DecisionMapRow) {
     ? Number(point.combinedSentiment)
     : Number(point.x || 0) / 7
   const hasRawPriceChange = Number.isFinite(Number(point.priceChangePct))
-  const hasRawVolume = point.relativeVolume != null && Number.isFinite(Number(point.relativeVolume))
+  const hasPressureInputs = (
+    (point.relativeVolume != null && Number.isFinite(Number(point.relativeVolume))) ||
+    (point.currentDollarVolume != null && Number.isFinite(Number(point.currentDollarVolume))) ||
+    (point.timeframeVolume != null && Number.isFinite(Number(point.timeframeVolume)))
+  )
   const fallbackY = Number.isFinite(Number(point.y)) ? Number(point.y) : 0
-  const fallbackZ = Number.isFinite(Number(point.z)) ? Number(point.z) : volumeAxisValue(row, row)
+  const fallbackZ = Number.isFinite(Number(point.z)) ? Number(point.z) : volumePressureAxisValue(row, row)
   return new THREE.Vector3(
     sentimentAxisValue(sentiment),
     hasRawPriceChange ? priceAxisValue(Number(point.priceChangePct)) : fallbackY,
-    hasRawVolume ? volumeAxisValue(point, row) : fallbackZ,
+    hasPressureInputs ? volumePressureAxisValue(point, row) : fallbackZ,
   )
 }
 
@@ -433,6 +448,63 @@ function rowPath(row: DecisionMapRow): PathPoint[] {
     .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
 }
 
+function pathPointTime(point: PathPoint, fallbackIndex = 0) {
+  const seconds = Number(point.timestamp || point.time || 0)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : fallbackIndex * DISPLAY_PATH_SAMPLE_SECONDS
+}
+
+function hasDisplayTurningPoint(rawPath: PathPoint[], index: number, row: DecisionMapRow) {
+  if (index <= 0 || index >= rawPath.length - 1) return true
+  const previous = rawPath[index - 1]
+  const current = rawPath[index]
+  const next = rawPath[index + 1]
+  const before = pathPointMovementScore(previous, current, row)
+  const after = pathPointMovementScore(current, next, row)
+  const priceMove = Math.abs((finiteValue(current.priceChangePct) ?? 0) - (finiteValue(previous.priceChangePct) ?? 0))
+  const sentimentMove = Math.abs((finiteValue(current.combinedSentiment) ?? 0) - (finiteValue(previous.combinedSentiment) ?? 0))
+  const pressureMove = Math.abs(volumePressurePlotScore(current, row) - volumePressurePlotScore(previous, row))
+  const strongTurn = Math.sign(before) !== Math.sign(after) && Math.max(Math.abs(before), Math.abs(after)) >= 0.55
+  return strongTurn || priceMove >= 3.5 || sentimentMove >= 0.18 || pressureMove >= 8
+}
+
+function displayPathPoints(row: DecisionMapRow): PathPoint[] {
+  const raw = rowPath(row).slice(-120)
+  if (raw.length <= 2) return raw
+
+  const kept = new Map<number, PathPoint>()
+  const keep = (index: number) => {
+    if (index >= 0 && index < raw.length) kept.set(index, raw[index])
+  }
+
+  keep(0)
+  keep(raw.length - 1)
+
+  let lastSampleTime = pathPointTime(raw[0], 0)
+  for (let i = 1; i < raw.length - 1; i += 1) {
+    const currentTime = pathPointTime(raw[i], i)
+    if (currentTime - lastSampleTime >= DISPLAY_PATH_SAMPLE_SECONDS) {
+      keep(i)
+      lastSampleTime = currentTime
+    }
+    if (hasDisplayTurningPoint(raw, i, row)) keep(i)
+  }
+
+  let sampled = Array.from(kept.entries()).sort((a, b) => a[0] - b[0])
+  if (sampled.length > DISPLAY_PATH_MAX_POINTS) {
+    const required = new Set<number>([0, raw.length - 1])
+    sampled.forEach(([index]) => {
+      if (hasDisplayTurningPoint(raw, index, row)) required.add(index)
+    })
+    const candidates = sampled.map(([index]) => index)
+    const targetStride = Math.max(1, Math.ceil(candidates.length / DISPLAY_PATH_MAX_POINTS))
+    sampled = sampled.filter(([index], order) => required.has(index) || order % targetStride === 0)
+    if (!sampled.some(([index]) => index === raw.length - 1)) sampled.push([raw.length - 1, raw[raw.length - 1]])
+    sampled.sort((a, b) => a[0] - b[0])
+  }
+
+  return sampled.map(([, point]) => point)
+}
+
 function resampleVectors(points: THREE.Vector3[], targetCount: number) {
   if (points.length < 2) return points.map(point => point.clone())
   const keyframes: THREE.Vector3[] = []
@@ -466,7 +538,7 @@ function resampleVectors(points: THREE.Vector3[], targetCount: number) {
 }
 
 function displayPathVectors(row: DecisionMapRow, amplify: boolean) {
-  const path = rowPath(row).slice(-120)
+  const path = displayPathPoints(row)
   const raw = path.map(point => pathPointVector(point, row))
   if (!amplify || raw.length < 2) return raw
   const box = new THREE.Box3().setFromPoints(raw)
@@ -475,29 +547,33 @@ function displayPathVectors(row: DecisionMapRow, amplify: boolean) {
     y: box.max.y - box.min.y,
     z: box.max.z - box.min.z,
   }
-  const activeDimensions = [spans.x, spans.y, spans.z].filter(value => value > 0.08).length
-  const targetSpan = marketCapPathSpan(row) * (activeDimensions <= 1 ? 0.55 : activeDimensions === 2 ? 0.82 : 1)
-  const center = box.getCenter(new THREE.Vector3())
-  const scaleForAxis = (span: number, targetShare: number, maxScale: number) => {
-    if (span <= 0.08) return 1
-    return clamp((targetSpan * targetShare) / span, 0.72, maxScale)
+  const rail = {
+    x0: MAP_FRAME_MIN.x + 0.72,
+    x1: MAP_FRAME_MAX.x - 0.5,
+    y0: MAP_FRAME_MIN.y + 0.65,
+    y1: MAP_FRAME_MAX.y - 0.55,
+    z0: MAP_FRAME_MIN.z + 0.72,
+    z1: MAP_FRAME_MAX.z - 0.55,
   }
-  const axisScale = {
-    x: scaleForAxis(spans.x, activeDimensions <= 1 ? 0.44 : 0.72, 16),
-    y: scaleForAxis(spans.y, activeDimensions <= 1 ? 0.78 : 0.92, 12),
-    z: scaleForAxis(spans.z, activeDimensions <= 1 ? 0.44 : 0.72, 16),
+  const spread = marketCapPathSpan(row)
+  const normalize = (value: number, min: number, span: number, fallback: number) => {
+    if (span <= 0.08) return fallback
+    return clamp((value - min) / span, 0, 1)
   }
-  // Visual-only time spread keeps repeated metric values from stacking into an unreadable column.
-  const chronologicalSpread = raw.length >= 6 ? targetSpan * 0.58 : 0
-  const arcSpread = raw.length >= 6 ? targetSpan * 0.18 : 0
+  const lerp = (a: number, b: number, t: number) => a + (b - a) * clamp(t, 0, 1)
+  // Visual-only inspection lens: a selected ticker is fit onto the outside rails
+  // of the cube so its journey is large enough to inspect point-by-point.
   return raw.map((point, index) => {
     const progress = raw.length > 1 ? index / (raw.length - 1) : 1
-    const timeOffset = (progress - 0.5) * chronologicalSpread
-    const arcOffset = Math.sin(progress * Math.PI) * arcSpread
+    const xNorm = normalize(point.x, box.min.x, spans.x, progress)
+    const yNorm = normalize(point.y, box.min.y, spans.y, 0.44 + (progress - 0.5) * 0.2)
+    const zNorm = normalize(point.z, box.min.z, spans.z, 0.2 + progress * 0.72)
+    const timeShear = raw.length >= 6 ? (progress - 0.5) * Math.min(1.9, spread * 0.22) : 0
+    const arcLift = raw.length >= 6 ? Math.sin(progress * Math.PI) * Math.min(1.65, spread * 0.2) : 0
     return new THREE.Vector3(
-      center.x + (point.x - center.x) * axisScale.x + timeOffset,
-      center.y + (point.y - center.y) * axisScale.y,
-      center.z + (point.z - center.z) * axisScale.z + arcOffset,
+      lerp(rail.x0, rail.x1, xNorm) + timeShear,
+      lerp(rail.y0, rail.y1, yNorm),
+      lerp(rail.z0, rail.z1, zNorm) + arcLift,
     )
   })
 }
@@ -584,7 +660,7 @@ function segmentColorValue(score: number) {
 }
 
 function visibleTrailSegments(row: DecisionMapRow, points: THREE.Vector3[]) {
-  const rawPath = rowPath(row).slice(-120)
+  const rawPath = displayPathPoints(row)
   if (points.length < 2 || rawPath.length < 2) return []
   const segmentCount = points.length - 1
   return Array.from({ length: segmentCount }, (_, index) => {
@@ -597,8 +673,23 @@ function visibleTrailSegments(row: DecisionMapRow, points: THREE.Vector3[]) {
   })
 }
 
+function isMajorPathPoint(rawPath: PathPoint[], index: number, row: DecisionMapRow) {
+  if (!rawPath.length) return false
+  if (index <= 0 || index >= rawPath.length - 1) return true
+  const stride = Math.max(1, Math.floor(rawPath.length / 8))
+  if (index % stride === 0) return true
+  const previous = rawPath[index - 1]
+  const current = rawPath[index]
+  const next = rawPath[index + 1]
+  const before = pathPointMovementScore(previous, current, row)
+  const after = pathPointMovementScore(current, next, row)
+  const priceMove = Math.abs((finiteValue(current.priceChangePct) ?? 0) - (finiteValue(previous.priceChangePct) ?? 0))
+  const sentimentMove = Math.abs((finiteValue(current.combinedSentiment) ?? 0) - (finiteValue(previous.combinedSentiment) ?? 0))
+  return Math.sign(before) !== Math.sign(after) || priceMove >= 2.5 || sentimentMove >= 0.12
+}
+
 function lastSegmentColor(row: DecisionMapRow, fallbackColor: number) {
-  const path = rowPath(row).slice(-120)
+  const path = displayPathPoints(row)
   if (path.length < 2) return fallbackColor
   return segmentColorValue(pathPointMovementScore(path[path.length - 2], path[path.length - 1], row))
 }
@@ -612,10 +703,10 @@ function liquidityClass(status?: string) {
 }
 
 function bubbleSize(row: DecisionMapRow) {
-  const pressurePart = volumePressurePlotScore(row, row) / 240
-  const volumePart = Math.sqrt(Math.max(1, Number(row.rollingVolume || row.currentVolume || 1))) / 42000
-  const accelerationPart = Math.log1p(Math.max(0, Number(row.volumeAcceleration || 0))) / 18
-  return Math.max(0.12, Math.min(0.48, 0.12 + pressurePart + volumePart + accelerationPart))
+  const pressurePart = volumePressurePlotScore(row, row) / 420
+  const volumePart = Math.sqrt(Math.max(1, Number(row.rollingVolume || row.currentVolume || 1))) / 76000
+  const accelerationPart = Math.log1p(Math.max(0, Number(row.volumeAcceleration || 0))) / 34
+  return Math.max(0.09, Math.min(0.26, 0.09 + pressurePart + volumePart + accelerationPart))
 }
 
 function makeLabelSprite(text: string) {
@@ -669,6 +760,194 @@ function MetricCell({ label, value, tone }: { label: string; value: ReactNode; t
   )
 }
 
+function MiniPriceDensityChart({ data }: { data?: MiniPriceDensity | null }) {
+  const points = (data?.points || []).filter(point =>
+    Number.isFinite(point.time) && Number.isFinite(point.price) && Number.isFinite(point.density),
+  )
+  if (points.length < 2) return null
+  const width = 256
+  const height = 96
+  const pad = { left: 8, right: 8, top: 10, bottom: 18 }
+  const x0 = points[0].time
+  const x1 = points[points.length - 1].time
+  const prices = points.map(point => point.price)
+  const densities = points.map(point => point.density)
+  const pMin = Math.min(...prices)
+  const pMax = Math.max(...prices)
+  const dMax = Math.max(1, ...densities)
+  const sx = (time: number) => pad.left + ((time - x0) / Math.max(1, x1 - x0)) * (width - pad.left - pad.right)
+  const syPrice = (price: number) => pad.top + (1 - ((price - pMin) / Math.max(0.0001, pMax - pMin))) * (height - pad.top - pad.bottom)
+  const syDensity = (density: number) => pad.top + (1 - (density / dMax)) * (height - pad.top - pad.bottom)
+  const pricePath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${sx(point.time).toFixed(1)},${syPrice(point.price).toFixed(1)}`).join(' ')
+  const densityPath = points.map((point, index) => `${index === 0 ? 'M' : 'L'}${sx(point.time).toFixed(1)},${syDensity(point.density).toFixed(1)}`).join(' ')
+  const firstLabel = compactTimestamp(points[0].time)
+  const lastLabel = compactTimestamp(points[points.length - 1].time)
+  return (
+    <div className="rounded border border-slate-700/70 bg-slate-900/70 px-2 py-1.5">
+      <div className="mb-1 flex items-center justify-between gap-2 text-[10px]">
+        <span className="font-semibold uppercase tracking-wide text-sky-300">Price + Density</span>
+        <span className="font-mono text-slate-400">{data?.rollingWindowMinutes || '--'}m</span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-24 w-full" role="img" aria-label={`${data?.ticker || ''} mini price and density chart`}>
+        <rect x="0" y="0" width={width} height={height} fill="rgba(15,23,42,0.68)" />
+        {[0.25, 0.5, 0.75].map(t => (
+          <line key={t} x1={pad.left} x2={width - pad.right} y1={pad.top + t * (height - pad.top - pad.bottom)} y2={pad.top + t * (height - pad.top - pad.bottom)} stroke="rgba(51,65,85,0.55)" strokeWidth="1" />
+        ))}
+        {points.map((point, index) => (
+          <line
+            key={`${point.time}-${index}`}
+            x1={sx(point.time)}
+            x2={sx(point.time)}
+            y1={height - pad.bottom}
+            y2={Math.max(pad.top, syDensity(point.density))}
+            stroke="rgba(251,146,60,0.28)"
+            strokeWidth="1"
+          />
+        ))}
+        <path d={densityPath} fill="none" stroke="#f97316" strokeWidth="1.8" strokeLinejoin="round" strokeLinecap="round" />
+        <path d={pricePath} fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <text x={pad.left} y={height - 4} fill="#94a3b8" fontSize="9" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace">{firstLabel}</text>
+        <text x={width - pad.right} y={height - 4} fill="#94a3b8" fontSize="9" fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace" textAnchor="end">{lastLabel}</text>
+      </svg>
+    </div>
+  )
+}
+
+function clockLabelFromSec(timeSec: number) {
+  const d = new Date(timeSec * 1000)
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+function trailingMessageCounts(values: number[], windowMinutes: number) {
+  const out: number[] = []
+  const window = Math.max(1, Math.round(windowMinutes || 1))
+  let sum = 0
+  for (let i = 0; i < values.length; i += 1) {
+    sum += Number(values[i] || 0)
+    if (i - window >= 0) sum -= Number(values[i - window] || 0)
+    out.push(Number(sum.toFixed(4)))
+  }
+  return out
+}
+
+function pathDensityAt(path: PathPoint[], timeSec: number, rollingWindowMinutes: number) {
+  if (!path.length) return null
+  let bestPast: PathPoint | null = null
+  let nearest: PathPoint | null = null
+  let nearestDistance = Infinity
+  for (const point of path) {
+    const pointTime = Number(point.timestamp || point.time || 0)
+    if (!Number.isFinite(pointTime) || pointTime <= 0) continue
+    const distance = Math.abs(pointTime - timeSec)
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearest = point
+    }
+    if (pointTime <= timeSec) bestPast = point
+  }
+  const source = bestPast || nearest
+  if (!source) return null
+  const perHour = Number(source.socialDensityPerHour ?? source.messageDensityPerHour ?? 0)
+  if (!Number.isFinite(perHour) || perHour <= 0) return null
+  return Number((perHour * (Math.max(1, rollingWindowMinutes) / 60)).toFixed(3))
+}
+
+function miniPriceDensityFromPath(row: DecisionMapRow | null | undefined, ticker: string, rollingWindowMinutes: number): MiniPriceDensity | null {
+  if (!row || !ticker) return null
+  const path = rowPath(row)
+  if (path.length < 2) return null
+  const last = path[path.length - 1]
+  const latestPrice = finiteValue(row.price) ?? finiteValue(row.regularPrice) ?? finiteValue(row.postmarketPrice) ?? finiteValue(row.premarketPrice)
+  const latestMove = finiteValue(last.priceChangePct) ?? 0
+  const basePrice = latestPrice != null && Math.abs(1 + latestMove / 100) > 0.0001
+    ? latestPrice / (1 + latestMove / 100)
+    : latestPrice
+  if (basePrice == null || basePrice <= 0) return null
+  const points = path
+    .map((point, index) => {
+      const move = finiteValue(point.priceChangePct) ?? 0
+      const densityPerHour = Number(point.socialDensityPerHour ?? point.messageDensityPerHour ?? 0)
+      return {
+        time: pathPointTime(point, index),
+        price: Number((basePrice * (1 + move / 100)).toFixed(4)),
+        density: Number.isFinite(densityPerHour) && densityPerHour > 0
+          ? Number((densityPerHour * (Math.max(1, rollingWindowMinutes) / 60)).toFixed(3))
+          : 0,
+      }
+    })
+    .filter(point => Number.isFinite(point.time) && Number.isFinite(point.price) && Number.isFinite(point.density))
+  if (points.length < 2) return null
+  const hasDensity = points.some(point => point.density > 0)
+  return {
+    ticker: ticker.toUpperCase(),
+    rollingWindowMinutes,
+    points: points.slice(-DISPLAY_PATH_MAX_POINTS),
+    priceSource: 'path',
+    densitySource: hasDensity ? 'path' : 'none',
+    limitedPrice: true,
+  }
+}
+
+function miniPriceDensityFromChartPayload(payload: any, ticker: string, rollingWindowMinutes: number, row?: DecisionMapRow | null): MiniPriceDensity | null {
+  const candles = Array.isArray(payload?.candles) ? payload.candles : []
+  if (!ticker || candles.length < 2) return miniPriceDensityFromPath(row, ticker, rollingWindowMinutes)
+  const socialRows = Array.isArray(payload?.social_series)
+    ? payload.social_series
+    : Array.isArray(payload?.social_density)
+      ? payload.social_density
+      : []
+  const densityByTime = new Map<number, number>()
+  const densityByLabel = new Map<string, number>()
+  for (const row of socialRows) {
+    const time = Number(row?.time ?? row?.timestamp ?? row?.t)
+    const value = Number(row?.count ?? row?.message_count ?? row?.value ?? row?.density ?? 0)
+    if (Number.isFinite(time) && Number.isFinite(value)) {
+      densityByTime.set(time, value)
+      const label = row?.label || row?.time_label || clockLabelFromSec(time)
+      if (label) densityByLabel.set(String(label), value)
+    }
+  }
+  const candlePoints = candles
+    .map((candle: any) => ({ time: Number(candle?.time), price: Number(candle?.close) }))
+    .filter((point: { time: number; price: number }) => Number.isFinite(point.time) && Number.isFinite(point.price))
+  if (candlePoints.length < 2) return null
+
+  const rawCounts = candlePoints.map(point => {
+    if (densityByTime.has(point.time)) return Number(densityByTime.get(point.time) || 0)
+    return Number(densityByLabel.get(clockLabelFromSec(point.time)) || 0)
+  })
+  const chartRollingCounts = trailingMessageCounts(rawCounts, rollingWindowMinutes)
+  const path = row ? rowPath(row) : []
+  const pathHasDensity = path.some(point => Number(point.socialDensityPerHour ?? point.messageDensityPerHour ?? 0) > 0)
+  const chartMessageCount = rawCounts.reduce((sum, value) => sum + Number(value || 0), 0)
+  const usePathDensity = pathHasDensity && (
+    chartMessageCount <= 0 ||
+    (Number(row?.socialCount || 0) > 0 && chartMessageCount < Number(row?.socialCount || 0) * 0.35)
+  )
+
+  const points = candlePoints
+    .map((point, index) => ({
+      ...point,
+      density: usePathDensity
+        ? Number(pathDensityAt(path, point.time, rollingWindowMinutes) || 0)
+        : Number(chartRollingCounts[index] || 0),
+    }))
+    .slice(-180)
+    .filter(point => Number.isFinite(point.time) && Number.isFinite(point.price) && Number.isFinite(point.density))
+  if (points.length < 2) return null
+  const hasDensity = points.some(point => point.density > 0)
+  return {
+    ticker: ticker.toUpperCase(),
+    rollingWindowMinutes,
+    points,
+    priceSource: 'chart',
+    densitySource: hasDensity ? (usePathDensity ? 'path' : 'chart') : 'none',
+    limitedPrice: candlePoints.length < Math.min(90, Math.max(20, rollingWindowMinutes * 0.35)),
+  }
+}
+
 function DetailRow({ label, value, tone }: { label: string; value: ReactNode; tone?: string }) {
   return (
     <div className="flex min-w-0 items-start justify-between gap-3 border-b border-slate-800/70 py-1 last:border-b-0">
@@ -694,7 +973,9 @@ function ThreeDecisionMap({
   isLoading,
   selectedTicker,
   playbackProgress,
+  miniPriceDensity,
   onSelectTicker,
+  onHoverTicker,
 }: {
   rows: DecisionMapRow[]
   zoom: number
@@ -702,14 +983,16 @@ function ThreeDecisionMap({
   isLoading: boolean
   selectedTicker?: string
   playbackProgress?: number | null
+  miniPriceDensity?: MiniPriceDensity | null
   onSelectTicker?: (ticker: string) => void
+  onHoverTicker?: (ticker: string) => void
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const stateRef = useRef({ theta: -0.7, phi: 1.12, radius: 18, dragging: false, x: 0, y: 0 })
   const selectedTickerRef = useRef(selectedTicker || '')
   const playbackRef = useRef<{ ticker?: string; progress: number | null }>({ ticker: selectedTicker, progress: playbackProgress ?? null })
   const trailApiRef = useRef<{ show: (ticker: string) => void; clear: () => void } | null>(null)
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; row: DecisionMapRow } | null>(null)
+  const [tooltip, setTooltip] = useState<DecisionTooltip | null>(null)
 
   useEffect(() => {
     selectedTickerRef.current = selectedTicker || ''
@@ -737,27 +1020,41 @@ function ThreeDecisionMap({
     light.position.set(8, 12, 8)
     scene.add(light)
 
-    const grid = new THREE.GridHelper(16, 16, 0x334155, 0x1e293b)
-    grid.position.z = 3.5
-    grid.rotation.x = Math.PI / 2
-    group.add(grid)
-
-    const axes = new THREE.AxesHelper(7.8)
-    group.add(axes)
+    const frameBox = new THREE.Box3(MAP_FRAME_MIN, MAP_FRAME_MAX)
+    const frameHelper = new THREE.Box3Helper(frameBox, 0x334155)
+    group.add(frameHelper)
+    const backGrid = new THREE.GridHelper(16, 16, 0x334155, 0x1e293b)
+    backGrid.position.set(0, 0.5, MAP_FRAME_MAX.z)
+    backGrid.rotation.x = Math.PI / 2
+    group.add(backGrid)
+    const floorGrid = new THREE.GridHelper(16, 16, 0x334155, 0x1e293b)
+    floorGrid.position.set(0, MAP_FRAME_MIN.y, 3)
+    group.add(floorGrid)
+    const addAxisLine = (start: THREE.Vector3, end: THREE.Vector3, color: number) => {
+      const geometry = new THREE.BufferGeometry().setFromPoints([start, end])
+      const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.92 }))
+      group.add(line)
+    }
+    addAxisLine(new THREE.Vector3(MAP_FRAME_MIN.x, MAP_FRAME_MIN.y, MAP_FRAME_MIN.z), new THREE.Vector3(MAP_FRAME_MAX.x, MAP_FRAME_MIN.y, MAP_FRAME_MIN.z), 0x0ea5e9)
+    addAxisLine(new THREE.Vector3(MAP_FRAME_MIN.x, MAP_FRAME_MIN.y, MAP_FRAME_MIN.z), new THREE.Vector3(MAP_FRAME_MIN.x, MAP_FRAME_MAX.y, MAP_FRAME_MIN.z), 0x84cc16)
+    addAxisLine(new THREE.Vector3(MAP_FRAME_MIN.x, MAP_FRAME_MIN.y, MAP_FRAME_MIN.z), new THREE.Vector3(MAP_FRAME_MIN.x, MAP_FRAME_MIN.y, MAP_FRAME_MAX.z), 0xf59e0b)
     const xLabel = makeLabelSprite('Sentiment')
-    xLabel.position.set(7.7, -5.6, 0)
+    xLabel.position.set(MAP_FRAME_MAX.x + 0.5, MAP_FRAME_MIN.y - 0.2, MAP_FRAME_MIN.z)
     group.add(xLabel)
-    const yLabel = makeLabelSprite('Price %')
-    yLabel.position.set(-8.5, 4.8, 0)
+    const yLabel = makeLabelSprite('Move %')
+    yLabel.position.set(MAP_FRAME_MIN.x - 0.8, MAP_FRAME_MAX.y + 0.15, MAP_FRAME_MIN.z)
     group.add(yLabel)
-    const zLabel = makeLabelSprite('Rel Vol')
-    zLabel.position.set(-8.4, -5.4, 7)
+    const zLabel = makeLabelSprite('Cap Press')
+    zLabel.position.set(MAP_FRAME_MIN.x - 0.8, MAP_FRAME_MIN.y - 0.2, MAP_FRAME_MAX.z + 0.35)
     group.add(zLabel)
 
     const sphereGeometry = new THREE.SphereGeometry(1, 24, 16)
     const haloGeometry = new THREE.TorusGeometry(1.22, 0.045, 6, 24)
+    const rocketNoseGeometry = new THREE.ConeGeometry(0.22, 0.7, 22)
+    const rocketPlumeGeometry = new THREE.ConeGeometry(0.18, 0.52, 18)
     const meshes: THREE.Mesh[] = []
     const trailGroup = new THREE.Group()
+    const trailHitObjects: THREE.Object3D[] = []
     group.add(trailGroup)
     let hoveredMesh: THREE.Mesh | null = null
     let hoveredTicker = ''
@@ -776,18 +1073,22 @@ function ThreeDecisionMap({
       }
       const frame = pathFrame(row)
       cameraTarget = frame.center
-      stateRef.current.radius = clamp(frame.span * 1.85 + 7.5, 10, 26)
+      stateRef.current.radius = clamp(frame.span * 1.12 + 5.2, 8.5, 24)
       updateCamera()
     }
-    const setClampedTooltip = (clientX: number, clientY: number, row: DecisionMapRow) => {
+    renderer.domElement.style.touchAction = 'none'
+    renderer.domElement.style.cursor = 'grab'
+    const setClampedTooltip = (clientX: number, clientY: number, row: DecisionMapRow, extra: Partial<DecisionTooltip> = {}) => {
       const rect = renderer.domElement.getBoundingClientRect()
-      const width = Math.min(430, Math.max(320, rect.width - 24))
-      const height = Math.min(580, Math.max(320, rect.height - 24))
+      const compactTooltip = Boolean(extra.compact)
+      const width = compactTooltip ? Math.min(280, Math.max(240, rect.width - 24)) : Math.min(430, Math.max(320, rect.width - 24))
+      const height = compactTooltip ? Math.min(190, Math.max(150, rect.height - 24)) : Math.min(430, Math.max(300, rect.height - 24))
       const x = clamp(clientX - rect.left + 14, 8, Math.max(8, rect.width - width - 8))
       const y = clamp(clientY - rect.top + 14, 8, Math.max(8, rect.height - height - 8))
-      setTooltip({ x, y, row })
+      setTooltip({ x, y, row, ...extra })
     }
     const clearTrailChildren = () => {
+      trailHitObjects.length = 0
       while (trailGroup.children.length) {
         const child = trailGroup.children.pop()
         if (child) disposeObject(child)
@@ -820,40 +1121,95 @@ function ThreeDecisionMap({
       const progress = amplify ? playbackRef.current.progress : null
       const points = visibleTrailPoints(row, progress, amplify)
       if (points.length < 2) return
+      const rawPath = displayPathPoints(row)
       const color = pathColorValue(row.path_color)
       const segments = visibleTrailSegments(row, points)
-      segments.forEach(segment => {
+      const playbackMode = amplify && progress != null
+      const activeSegmentIndex = Math.max(0, segments.length - 1)
+      const activeSegmentColor = segments[activeSegmentIndex]?.color ?? lastSegmentColor(row, color)
+      segments.forEach((segment, index) => {
         const geometry = new THREE.BufferGeometry().setFromPoints([segment.start, segment.end])
-        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: segment.color, transparent: true, opacity: amplify ? 1 : 0.76 }))
+        const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({
+          color: segment.color,
+          transparent: true,
+          opacity: playbackMode ? (index === activeSegmentIndex ? 1 : 0.7) : amplify ? 0.86 : 0.76,
+        }))
         trailGroup.add(line)
       })
-      const dotGeometry = new THREE.SphereGeometry(amplify ? 0.095 : 0.065, 12, 8)
+      const dotGeometry = new THREE.SphereGeometry(amplify ? 0.18 : 0.065, 18, 12)
       points.forEach((point, index) => {
-        const localColor = index === 0 ? color : (segments[Math.min(segments.length - 1, index - 1)]?.color ?? color)
+        const rawIndex = rawPath.length
+          ? clamp(Math.round((index / Math.max(1, points.length - 1)) * (rawPath.length - 1)), 0, rawPath.length - 1)
+          : 0
+        const isCurrentPoint = index === points.length - 1
+        const isPreviousPoint = index === points.length - 2
+        if (playbackMode && !isCurrentPoint && !isPreviousPoint) return
+        const checkpoint = amplify && isMajorPathPoint(rawPath, rawIndex, row)
+        const localColor = playbackMode
+          ? (isCurrentPoint ? activeSegmentColor : 0x94a3b8)
+          : index === 0 ? color : (segments[Math.min(segments.length - 1, index - 1)]?.color ?? color)
         const dot = new THREE.Mesh(dotGeometry, new THREE.MeshBasicMaterial({
           color: localColor,
           transparent: true,
-          opacity: index === points.length - 1 ? 1 : amplify ? 0.52 : 0.28,
+          opacity: playbackMode ? (isCurrentPoint ? 1 : 0.7) : index === points.length - 1 ? 1 : checkpoint ? 0.95 : amplify ? 0.78 : 0.28,
         }))
         dot.position.copy(point)
-        dot.scale.setScalar(index === points.length - 1 ? (amplify ? 1.9 : 1.45) : 1)
+        dot.scale.setScalar(playbackMode
+          ? (isCurrentPoint ? 2.15 : 1.08)
+          : index === points.length - 1 ? (amplify ? 2.05 : 1.45) : checkpoint ? 1.55 : amplify ? 1.08 : 0.72)
+        dot.userData.row = row
+        dot.userData.isPathPoint = true
+        dot.userData.pathPoint = rawPath[rawIndex] || null
+        dot.userData.pathPointIndex = rawIndex + 1
+        if (amplify) trailHitObjects.push(dot)
         trailGroup.add(dot)
       })
       const start = points[0]
       const end = points[points.length - 1]
+      const previous = points[Math.max(0, points.length - 2)]
+      const direction = new THREE.Vector3().subVectors(end, playbackMode ? previous : start)
       if (amplify) {
         const marker = new THREE.Mesh(
-          new THREE.SphereGeometry(0.22, 20, 12),
-          new THREE.MeshBasicMaterial({ color: lastSegmentColor(row, color), transparent: true, opacity: 0.95 }),
+          new THREE.SphereGeometry(0.16, 20, 12),
+          new THREE.MeshBasicMaterial({ color: activeSegmentColor, transparent: true, opacity: 0.95 }),
         )
         marker.position.copy(end)
         trailGroup.add(marker)
+        const rocketDirection = direction.length() > 0.01
+          ? direction.clone().normalize()
+          : new THREE.Vector3(1, 0, 0)
+        const nose = new THREE.Mesh(
+          rocketNoseGeometry,
+          new THREE.MeshBasicMaterial({ color: activeSegmentColor, transparent: true, opacity: 0.98 }),
+        )
+        nose.position.copy(end).add(rocketDirection.clone().multiplyScalar(0.46))
+        nose.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), rocketDirection)
+        nose.userData.row = row
+        nose.userData.isPathPoint = true
+        nose.userData.pathPoint = rawPath[rawPath.length - 1] || null
+        nose.userData.pathPointIndex = rawPath.length
+        trailHitObjects.push(nose)
+        trailGroup.add(nose)
+        const plume = new THREE.Mesh(
+          rocketPlumeGeometry,
+          new THREE.MeshBasicMaterial({ color: 0xf97316, transparent: true, opacity: 0.52 }),
+        )
+        plume.position.copy(end).add(rocketDirection.clone().multiplyScalar(-0.34))
+        plume.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), rocketDirection.clone().multiplyScalar(-1))
+        trailGroup.add(plume)
       }
-      const direction = new THREE.Vector3().subVectors(end, start)
       if (direction.length() > 0.01) {
-        const arrow = new THREE.ArrowHelper(direction.clone().normalize(), end, 0.55, lastSegmentColor(row, color), 0.2, 0.12)
+        const arrow = new THREE.ArrowHelper(direction.clone().normalize(), end, 0.55, activeSegmentColor, 0.2, 0.12)
         trailGroup.add(arrow)
       }
+    }
+    const restoreSelectedTrail = () => {
+      const selected = selectedTickerRef.current
+      if (!selected) return false
+      const selectedMesh = meshes.find(mesh => mesh.userData.row?.ticker === selected)
+      if (!selectedMesh) return false
+      showTrail(selectedMesh.userData.row, selectedMesh)
+      return true
     }
     rows.forEach((row, index) => {
       const currentSelectedTicker = selectedTickerRef.current
@@ -916,7 +1272,7 @@ function ThreeDecisionMap({
         const isDimmed = Boolean(currentSelectedTicker && !isSelected)
         const baseSize = isDimmed ? rawBaseSize * 0.78 : rawBaseSize
         mesh.userData.baseSize = baseSize
-        mesh.scale.setScalar(isSelected ? baseSize * 1.28 : baseSize)
+        mesh.scale.setScalar(isSelected ? baseSize * 1.08 : baseSize)
         const material = mesh.material as THREE.MeshStandardMaterial
         material.opacity = isDimmed ? 0.34 : 0.95
         material.emissiveIntensity = isSelected ? 0.34 : 0.11
@@ -938,6 +1294,7 @@ function ThreeDecisionMap({
     }
 
     const onPointerDown = (event: PointerEvent) => {
+      renderer.domElement.style.cursor = 'grabbing'
       stateRef.current.dragging = true
       stateRef.current.x = event.clientX
       stateRef.current.y = event.clientY
@@ -949,18 +1306,29 @@ function ThreeDecisionMap({
     const onPointerUp = (event: PointerEvent) => {
       const wasClick = !didDrag && Math.hypot(event.clientX - pointerDownX, event.clientY - pointerDownY) < 6
       stateRef.current.dragging = false
+      renderer.domElement.style.cursor = 'grab'
       try { host.releasePointerCapture(event.pointerId) } catch (_) {}
       if (wasClick) {
         const rect = renderer.domElement.getBoundingClientRect()
         pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
         pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
         raycaster.setFromCamera(pointer, camera)
-        const hit = raycaster.intersectObjects(meshes, false)[0]
+        const hit = raycaster.intersectObjects([...trailHitObjects, ...meshes], false)[0]
         if (hit?.object?.userData?.row) {
           const row = hit.object.userData.row as DecisionMapRow
-          showTrail(row, hit.object as THREE.Mesh)
-          setClampedTooltip(event.clientX, event.clientY, row)
-          onSelectTicker?.(row.ticker)
+          onHoverTicker?.(row.ticker)
+          if (hit.object.userData.isPathPoint) {
+            restoreSelectedTrail()
+            setClampedTooltip(event.clientX, event.clientY, row, {
+              compact: true,
+              point: hit.object.userData.pathPoint,
+              pointIndex: hit.object.userData.pathPointIndex,
+            })
+          } else {
+            showTrail(row, hit.object as THREE.Mesh)
+            setClampedTooltip(event.clientX, event.clientY, row)
+            onSelectTicker?.(row.ticker)
+          }
         } else if (selectedTickerRef.current) {
           onSelectTicker?.('')
           setTooltip(null)
@@ -980,30 +1348,48 @@ function ThreeDecisionMap({
         stateRef.current.phi = Math.max(0.42, Math.min(2.25, stateRef.current.phi + dy * 0.006))
         stateRef.current.x = event.clientX
         stateRef.current.y = event.clientY
-        clearTrail()
+        if (!selectedTickerRef.current) clearTrail()
         setTooltip(null)
         updateCamera()
         return
       }
 
       raycaster.setFromCamera(pointer, camera)
-      const hit = raycaster.intersectObjects(meshes, false)[0]
+      const hit = raycaster.intersectObjects([...trailHitObjects, ...meshes], false)[0]
       if (hit?.object?.userData?.row) {
-        showTrail(hit.object.userData.row, hit.object as THREE.Mesh)
-        setClampedTooltip(event.clientX, event.clientY, hit.object.userData.row)
+        const row = hit.object.userData.row as DecisionMapRow
+        onHoverTicker?.(row.ticker)
+        if (hit.object.userData.isPathPoint) {
+          setClampedTooltip(event.clientX, event.clientY, row, {
+            compact: true,
+            point: hit.object.userData.pathPoint,
+            pointIndex: hit.object.userData.pathPointIndex,
+          })
+          return
+        }
+        if (!selectedTickerRef.current || selectedTickerRef.current === row.ticker) {
+          showTrail(row, hit.object as THREE.Mesh)
+        } else {
+          restoreSelectedTrail()
+        }
+        setClampedTooltip(event.clientX, event.clientY, row)
       } else {
-        if (!selectedTickerRef.current) clearTrail()
+        if (!restoreSelectedTrail()) clearTrail()
+        onHoverTicker?.('')
         setTooltip(null)
       }
     }
     const onWheel = (event: WheelEvent) => {
       event.preventDefault()
-      stateRef.current.radius = Math.max(8, Math.min(34, stateRef.current.radius + event.deltaY * 0.015))
+      const trackpadPinch = event.ctrlKey || Math.abs(event.deltaY) < 8
+      const speed = trackpadPinch ? 0.045 : 0.018
+      stateRef.current.radius = clamp(stateRef.current.radius + event.deltaY * speed, 4.8, 42)
       updateCamera()
     }
     const onPointerLeave = (event: PointerEvent) => {
       onPointerUp(event)
       if (!selectedTickerRef.current) clearTrail()
+      onHoverTicker?.('')
       setTooltip(null)
     }
 
@@ -1077,6 +1463,8 @@ function ThreeDecisionMap({
         clearTrailChildren()
         sphereGeometry.dispose()
         haloGeometry.dispose()
+        rocketNoseGeometry.dispose()
+        rocketPlumeGeometry.dispose()
         renderer.dispose()
         renderer.domElement.remove()
       } catch (_) {}
@@ -1101,27 +1489,67 @@ function ThreeDecisionMap({
       <div className="pointer-events-none absolute right-3 top-3 z-20 max-w-[300px] rounded border border-sky-500/30 bg-slate-950/88 px-2 py-1.5 text-[10px] text-slate-300">
         <div className="font-semibold uppercase tracking-wide text-sky-300">Map legend</div>
         <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5">
-          <span className="font-mono text-sky-200">X</span><span>sentiment / catalyst strength</span>
-          <span className="font-mono text-sky-200">Y</span><span>session price movement %</span>
-          <span className="font-mono text-sky-200">Z</span><span>RelVol above 1x + liquidity pressure</span>
-          <span className="font-mono text-sky-200">Trail</span><span>ticker journey through selected window</span>
+          <span className="font-mono text-sky-200">X</span><span>rolling sentiment/catalyst pressure</span>
+          <span className="font-mono text-sky-200">Y</span><span>log-scaled session move %</span>
+          <span className="font-mono text-sky-200">Z</span><span>cap-adjusted volume pressure</span>
+          <span className="font-mono text-sky-200">Trail</span><span>green improves · red weakens · dots inspect</span>
         </div>
       </div>
       <div className="pointer-events-none absolute bottom-3 left-3 z-20 rounded border border-border bg-surface/90 px-2 py-1 text-[10px] text-slate-400">
-        Drag rotate · wheel zoom · hover inspect · click isolate · play selected journey
+        Drag rotate · wheel zoom · click ticker · hover/click movement dots
       </div>
       {tooltip && (
         <div
-          className="pointer-events-none absolute z-30 max-h-[calc(100%-16px)] w-[min(430px,calc(100%-16px))] overflow-y-auto rounded border border-cyan-400/40 bg-slate-950/96 p-3 text-xs shadow-2xl shadow-cyan-950/40"
+          className={clsx(
+            'pointer-events-none absolute z-30 max-h-[calc(100%-16px)] overflow-y-auto rounded border border-cyan-400/40 bg-slate-950/96 p-3 text-xs shadow-2xl shadow-cyan-950/40',
+            tooltip.compact ? 'w-[min(280px,calc(100%-16px))]' : 'w-[min(430px,calc(100%-16px))]',
+          )}
           style={{ left: tooltip.x, top: tooltip.y }}
         >
           {(() => {
             const row = tooltip.row
-            const headline = row.latestNewsTitles?.[0]
-            const firstPoint = firstPathPoint(row)
-            const latestPoint = lastPathPoint(row)
-            const missing = missingDataLabels(row)
-            const sources = sourceList(row)
+            const matchingMiniChart = miniPriceDensity && String(miniPriceDensity.ticker || '').toUpperCase() === row.ticker
+              ? miniPriceDensity
+              : null
+            const isActiveMiniTicker = String(activeMiniTicker || '').toUpperCase() === row.ticker
+            if (tooltip.compact && tooltip.point) {
+              const point = tooltip.point
+              const rawPath = rowPath(row)
+              const pointIndex = Math.max(1, Number(tooltip.pointIndex || 1))
+              const previousPoint = rawPath[pointIndex - 2] || null
+              const stepScore = pathPointMovementScore(previousPoint, point, row)
+              const stepTone = stepScore > 0.08 ? 'text-emerald-300' : stepScore < -0.08 ? 'text-red-300' : 'text-slate-300'
+              const stepLabel = stepScore > 0.08 ? 'improving' : stepScore < -0.08 ? 'weakening' : 'flat/mixed'
+              return (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-mono text-base font-semibold text-accent">{row.ticker}</span>
+                    <StatusPill className="border-sky-400/40 bg-sky-500/10 text-sky-100">
+                      point {pointIndex}
+                    </StatusPill>
+                  </div>
+                  <div className="font-mono text-sm text-slate-100">
+                    {point.displayTime || compactTimestamp(point.timestamp)}
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <MetricCell label="Sent" value={numberLabel(point.combinedSentiment, 2)} tone={(point.combinedSentiment ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'} />
+                    <MetricCell label="Move" value={signedPct(point.priceChangePct)} tone={(point.priceChangePct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'} />
+                    <MetricCell label="RelVol" value={numberLabel(point.relativeVolume, 2, 'x')} />
+                    <MetricCell label="Pressure" value={`${numberLabel(volumePressurePlotScore(point, row), 0)}/100`} />
+                    <MetricCell label="Step" value={stepLabel} tone={stepTone} />
+                    <MetricCell label="Delta" value={numberLabel(stepScore, 2)} tone={stepTone} />
+                  </div>
+                  <div className="text-[10px] leading-snug text-slate-400">
+                    {point.chartBarTime || point.timestampUtc || 'Timestamp from selected Decision Map path.'} · {pathSourceLabel(point.timestampSource)}
+                  </div>
+                  <div className="text-[10px] leading-snug text-slate-300">
+                    {previousPoint
+                      ? `${stepLabel}: price ${signedPct(previousPoint.priceChangePct)} -> ${signedPct(point.priceChangePct)}, sentiment ${numberLabel(previousPoint.combinedSentiment, 2)} -> ${numberLabel(point.combinedSentiment, 2)}`
+                      : 'First visible movement point in this selected journey.'}
+                  </div>
+                </div>
+              )
+            }
             return (
               <div className="space-y-2">
                 <div className="flex items-start justify-between gap-3">
@@ -1150,67 +1578,17 @@ function ThreeDecisionMap({
                   <MetricCell label="Float bucket" value={row.floatBucket || '--'} />
                   <MetricCell label="Short float" value={row.floatShort == null ? '--' : `${Number(row.floatShort).toFixed(2)}%`} />
                 </div>
-
-                <TooltipSection title="Ranking">
-                  <DetailRow label="State" value={`${row.quadrant} · ${labelForQuadrant(row.quadrant)}`} />
-                  <DetailRow label="Activity" value={`${numberLabel(row.activityScore, 0)} / 100`} />
-                  <DetailRow label="Float" value={`${compact(row.sharesFloat)} shares · ${row.floatBucket || 'unknown float'}`} />
-                  <DetailRow label="Target" value={`${numberLabel(row.relativeVolume, 2, 'x')} vs ${numberLabel(row.marketCapRelVolumeTarget, 1, 'x')} RelVol · ${money(row.currentDollarVolume)} vs ${money(row.dollarVolumeTarget)}`} />
-                  <DetailRow label="Why ranked" value={(row.reasons || []).slice(0, 3).join(' · ') || 'Screener-first rank from price, volume, sentiment, and catalyst evidence.'} />
-                </TooltipSection>
-
-                <TooltipSection title="Liquidity">
-                  <DetailRow label="Score" value={`${numberLabel(row.liquidityScore, 0)} / 100 · ${row.liquidityStatus || 'unknown'}`} tone={liquidityClass(row.liquidityStatus)} />
-                  <DetailRow label="Pressure" value={`${numberLabel(volumePressurePlotScore(row, row), 0)} / 100 visual pressure`} />
-                  <DetailRow label="Explanation" value={`${money(row.currentDollarVolume)} current dollar volume against ${money(row.liquidityTargetDollarVolume ?? row.dollarVolumeTarget)} target.`} />
-                </TooltipSection>
-
-                <TooltipSection title="Catalyst">
-                  <DetailRow label="Status" value={row.catalystLabel || 'No catalyst attached'} tone={row.catalystLabel ? 'text-emerald-200' : 'text-amber-200'} />
-                  <DetailRow label="Headline" value={headline?.title || 'No recent headline'} />
-                  <DetailRow label="Source/time" value={`${headline?.source || sources[0] || 'source unavailable'} · ${headline?.publishedAt ? timestampLabel(headline.publishedAt) : 'time unavailable'}`} />
-                </TooltipSection>
-
-                <TooltipSection title="Social + Window">
-                  <DetailRow label="Social" value={`${row.socialCount || 0} messages · ${numberLabel(row.socialMessageDensityPerHour, 2)}/hr · ${row.socialPlatforms?.slice(0, 3).join(', ') || 'no platform support'}`} />
-                  <DetailRow label="News" value={`${row.structuredArticleCount ?? row.articleCount ?? 0} structured · ${row.unstructuredArticleCount ?? 0} unstructured · ${numberLabel(row.newsDensityPerHour, 2)}/hr`} />
-                  <DetailRow label="Evidence" value={`news ${row.newsWindowUsed || windowLabel(windowHours)} · social ${row.socialWindowUsed || windowLabel(windowHours)}`} />
-                  <DetailRow label="News range" value={`${shortDateTime(row.sourceNewsWindowStart)} -> ${shortDateTime(row.sourceNewsWindowEnd)}`} />
-                  <DetailRow label="Social range" value={`${shortDateTime(row.sourceSocialWindowStart)} -> ${shortDateTime(row.sourceSocialWindowEnd)}`} />
-                </TooltipSection>
-
-                <TooltipSection title="Journey">
-                  <DetailRow label="Path" value={`${pathQualityLabel(row)} · ${row.path_points_count || 0} shown${row.path_window_raw_points_count ? ` / ${row.path_window_raw_points_count} raw` : ''}`} />
-                  <DetailRow label="Window" value={`${row.path_window_used || row.pathWindowUsed || windowLabel(windowHours)} selected · ${row.path_window_minutes || 0}m covered · ${row.path_market_date || 'market date unavailable'}`} />
-                  <DetailRow label="Sampling" value={`${row.path_sampling === 'shape_preserving' ? 'shape preserved' : row.path_sampling || 'none'} · ${pathSourceLabel(row.path_coverage)}`} />
-                  <DetailRow label="Direction" value={`${row.path_color === 'blue' ? 'improving' : row.path_color === 'red' ? 'weakening' : 'neutral/static'} · ${numberLabel(row.path_direction_score, 2)}`} />
-                  <DetailRow label="First point" value={`${firstPoint?.displayTime || compactTimestamp(firstPoint?.timestamp)} · raw ${firstPoint?.timestamp || '--'}`} />
-                  <DetailRow label="Last point" value={`${latestPoint?.displayTime || compactTimestamp(latestPoint?.timestamp)} · raw ${latestPoint?.timestamp || '--'}`} />
-                  <DetailRow label="Chart time" value={`${latestPoint?.chartBarTime || latestPoint?.timestampUtc || 'chart timestamp unavailable'}`} />
-                  <div className="pt-1 text-[10px] leading-snug text-slate-300">{row.path_explanation || 'Path history unavailable.'}</div>
-                </TooltipSection>
-
-                <TooltipSection title="Data Quality">
-                  <div className="flex flex-wrap gap-1">
-                    {missing.map(item => (
-                      <StatusPill
-                        key={item}
-                        className={item === 'complete core fields' ? 'border-emerald-400/40 bg-emerald-500/10 text-emerald-100' : 'border-amber-400/40 bg-amber-500/10 text-amber-100'}
-                      >
-                        {item}
-                      </StatusPill>
-                    ))}
+                {matchingMiniChart ? (
+                  <MiniPriceDensityChart data={matchingMiniChart} />
+                ) : isActiveMiniTicker && isMiniChartLoading ? (
+                  <div className="rounded border border-slate-700/70 bg-slate-900/70 px-2 py-1.5 text-[10px] text-slate-400">
+                    Price + Density chart loading for {row.ticker}.
                   </div>
-                  <div className="mt-1 text-[10px] text-slate-500">
-                    Row update {row.lastUpdated ? new Date(row.lastUpdated).toLocaleString() : '--'} · FinViz age {ageLabel(row.finvizAgeSeconds)}
+                ) : isActiveMiniTicker ? (
+                  <div className="rounded border border-slate-700/70 bg-slate-900/70 px-2 py-1.5 text-[10px] text-slate-400">
+                    No aligned Price + Density chart available for {row.ticker}.
                   </div>
-                </TooltipSection>
-
-                {selectedTicker === row.ticker && (
-                  <div className="rounded border border-sky-400/30 bg-sky-500/10 px-2 py-1 text-[10px] text-sky-100">
-                    Selected ticker path is amplified with a market-cap movement lens; raw values above remain unscaled.
-                  </div>
-                )}
+                ) : null}
               </div>
             )
           })()}
@@ -1225,9 +1603,10 @@ type DecisionMapPanelProps = {
   single?: boolean
   embedded?: boolean
   rollingWindowMinutes?: number
+  miniPriceDensity?: MiniPriceDensity | null
 }
 
-export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single = false, embedded = false, rollingWindowMinutes }: DecisionMapPanelProps = {}) {
+export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single = false, embedded = false, rollingWindowMinutes, miniPriceDensity }: DecisionMapPanelProps = {}) {
   const [urlParams] = useSearchParams()
   const requestedSingleTickerMode = ['1', 'true', 'yes'].includes(String(urlParams.get('single') || '').toLowerCase())
   const focusTicker = useMemo(() => {
@@ -1259,8 +1638,10 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
   const [zoom, setZoom] = useState(1)
   const [resetKey, setResetKey] = useState(0)
   const [selectedTicker, setSelectedTicker] = useState(focusTicker)
+  const [hoveredTicker, setHoveredTicker] = useState('')
   const [tickerQuery, setTickerQuery] = useState('')
   const [searchedTicker, setSearchedTicker] = useState('')
+  const tickerOptions = useTickerDatalistOptions(tickerQuery)
   const [isPlayingJourney, setIsPlayingJourney] = useState(false)
   const [playbackProgress, setPlaybackProgress] = useState<number | null>(null)
   const [blankRefreshKey, setBlankRefreshKey] = useState('')
@@ -1344,6 +1725,26 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
     () => selectedRow ? journeyMovementSpan(selectedRow) : 0,
     [selectedRow],
   )
+  const activeMiniTicker = hoveredTicker || selectedTicker || focusTicker
+  const activeMiniRow = useMemo(
+    () => activeMiniTicker ? rows.find(row => row.ticker === activeMiniTicker) || null : null,
+    [activeMiniTicker, rows],
+  )
+  const activeMiniWindowMinutes = Math.max(5, Math.round(windowHours * 60))
+  const activeMiniChartUrl = activeMiniTicker
+    ? `/api/charts/${encodeURIComponent(activeMiniTicker)}?tf=1m&events=1&window_minutes=${activeMiniWindowMinutes}&view_window_minutes=${activeMiniWindowMinutes}&bucket_minutes=1`
+    : null
+  const { data: activeMiniChartPayload, isLoading: isMiniChartLoading } = useSWR(activeMiniChartUrl, fetcher, {
+    refreshInterval: 60_000,
+    keepPreviousData: true,
+    revalidateOnFocus: false,
+  })
+  const activeMiniPriceDensity = useMemo(() => {
+    if (miniPriceDensity && String(miniPriceDensity.ticker || '').toUpperCase() === String(activeMiniTicker || '').toUpperCase()) {
+      return miniPriceDensity
+    }
+    return miniPriceDensityFromChartPayload(activeMiniChartPayload, String(activeMiniTicker || '').toUpperCase(), activeMiniWindowMinutes, activeMiniRow)
+  }, [activeMiniChartPayload, activeMiniRow, activeMiniTicker, activeMiniWindowMinutes, miniPriceDensity])
   const pathPointSummary = useMemo(() => {
     const counts = rows.map(row => Number(row.path_points_count || row.path_points?.length || 0)).sort((a, b) => a - b)
     const quality = rows.reduce<Record<string, number>>((acc, row) => {
@@ -1372,7 +1773,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
       if (t < 1) {
         frame = window.requestAnimationFrame(step)
       } else {
-        setPlaybackProgress(selectedVisualPath.length - 1)
+        setPlaybackProgress(null)
         setIsPlayingJourney(false)
       }
     }
@@ -1391,9 +1792,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
       return
     }
     setSelectedTicker(ticker)
-    const row = rows.find(item => item.ticker === ticker)
-    const path = row ? displayPathVectors(row, true) : []
-    setPlaybackProgress(path.length ? path.length - 1 : null)
+    setPlaybackProgress(null)
     setIsPlayingJourney(false)
   }, [rows])
 
@@ -1484,7 +1883,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
                 </div>
                 <div className="mt-1 text-[11px] text-slate-300">
                   {selectedRow
-                    ? `${selectedPath.length || 0} journey points · ${selectedRow.path_window_used || selectedRow.pathWindowUsed || windowLabel(windowHours)} · volume ${selectedRow.path_volume_timeframe || volumeTimeframe} · ${selectedRow.path_market_date || 'latest market day'}`
+                    ? `${selectedVisualPath.length || 0} display frames · ${selectedPath.length || 0} raw journey points · ${selectedRow.path_window_used || selectedRow.pathWindowUsed || windowLabel(windowHours)} · volume ${selectedRow.path_volume_timeframe || volumeTimeframe} · ${selectedRow.path_market_date || 'latest market day'}`
                     : isLoading ? 'Loading ticker journey...' : 'No Decision Map row found for this ticker.'}
                 </div>
               </div>
@@ -1522,7 +1921,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
                   <div className="mt-0.5 text-slate-200">{selectedRow.catalystLabel ? `${selectedRow.catalystLabel}${selectedRow.catalystFromLookback ? ` · ${selectedRow.catalystLookbackUsed || 'recent'} lookback` : ''}` : 'No catalyst'} · {(selectedRow.structuredArticleCount ?? selectedRow.articleCount ?? 0)} structured · {selectedRow.socialCount || 0} social</div>
                 </div>
                 <div className="rounded border border-slate-700/70 bg-slate-900/60 px-2 py-1">
-                  <span className="text-slate-500">Path</span>
+                  <span className="text-slate-500">Path window</span>
                   <div className="mt-0.5 text-slate-200">{selectedRow.path_window_minutes || 0}m covered · {selectedRow.path_window_raw_points_count || selectedRow.path_points_count || 0} raw · volume {selectedRow.path_volume_timeframe || volumeTimeframe}</div>
                 </div>
                 <div className="rounded border border-slate-700/70 bg-slate-900/60 px-2 py-1">
@@ -1541,7 +1940,9 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
               isLoading={isLoading}
               selectedTicker={selectedTicker || focusTicker}
               playbackProgress={playbackProgress}
+              miniPriceDensity={activeMiniPriceDensity}
               onSelectTicker={selectTicker}
+              onHoverTicker={setHoveredTicker}
             />
           </div>
         </section>
@@ -1555,7 +1956,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
         <div className="px-3 py-2 border-b border-border flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-xs uppercase text-neutral font-medium">Three.js Decision Map</div>
-            <div className="text-[11px] text-slate-400">X sentiment · Y session price change · Z relative volume · bubble participation · ring market-cap bucket</div>
+            <div className="text-[11px] text-slate-400">X rolling sentiment · Y log session move · Z cap-adjusted pressure · trail green/red movement · ring market-cap bucket</div>
           </div>
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral">
             {[
@@ -1588,12 +1989,18 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
               <input
                 type="search"
                 value={tickerQuery}
+                list="decision-map-ticker-universe"
                 maxLength={8}
                 autoComplete="off"
                 placeholder="Ticker"
                 onChange={event => setTickerQuery(event.target.value.toUpperCase().replace(/[^A-Z0-9.-]/g, ''))}
                 className="w-full rounded border border-border bg-bg px-2 py-1.5 font-mono text-xs text-white placeholder:text-slate-600 focus:border-sky-400 focus:outline-none"
               />
+              <datalist id="decision-map-ticker-universe">
+                {tickerOptions.map(row => (
+                  <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+                ))}
+              </datalist>
             </label>
             <button
               type="submit"
@@ -1621,7 +2028,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
             {selectedRow ? (
               <>
                 <span className="font-mono text-accent font-semibold">{selectedRow.ticker}</span>
-                <span className="text-neutral"> isolated · {selectedPath.length || 0} journey points</span>
+                <span className="text-neutral"> isolated · {selectedVisualPath.length || 0} display frames · {selectedPath.length || 0} raw points</span>
                 {selectedVisualPath.length > 0 && (
                   <span className="text-neutral"> · frame {playbackFrame}/{selectedVisualPath.length}</span>
                 )}
@@ -1665,7 +2072,7 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-300 sm:grid-cols-4">
-                <div><span className="text-slate-500">Path points</span><br /><span className="font-mono text-slate-100">{selectedRow.path_points_count || selectedPath.length}</span></div>
+                <div><span className="text-slate-500">Frames / raw</span><br /><span className="font-mono text-slate-100">{selectedVisualPath.length || 0}/{selectedRow.path_points_count || selectedPath.length}</span></div>
                 <div><span className="text-slate-500">First</span><br /><span className="font-mono text-slate-100">{compactTimestamp(selectedFirstPoint?.timestamp)}</span></div>
                 <div><span className="text-slate-500">Last</span><br /><span className="font-mono text-slate-100">{compactTimestamp(selectedLastPoint?.timestamp)}</span></div>
                 <div><span className="text-slate-500">3D Vol</span><br /><span className="font-mono text-slate-100">{selectedRow.path_volume_timeframe || volumeTimeframe}</span></div>
@@ -1783,7 +2190,9 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
               isLoading={isLoading}
               selectedTicker={selectedTicker || undefined}
               playbackProgress={playbackProgress}
+              miniPriceDensity={activeMiniPriceDensity}
               onSelectTicker={selectTicker}
+              onHoverTicker={setHoveredTicker}
             />
             {singleTickerMismatch && (
               <div className="mt-2 rounded border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">

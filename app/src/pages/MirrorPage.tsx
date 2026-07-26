@@ -5,8 +5,9 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { clsx } from 'clsx'
 import { CandlestickChart } from './CandlestickChart'
 import { DecisionMapPanel } from './DecisionMapPanel'
-import { overlaySeries, type SocialSeries } from '@/lib/chartAgg'
+import { overlaySeries, type LinePoint, type SocialSeries } from '@/lib/chartAgg'
 import type { ScreenerRow } from '@/lib/types'
+import { useTickerDatalistOptions } from '@/lib/useTickerUniverse'
 
 const fetcher = (url: string) => fetch(url, { cache: 'no-store' }).then(r => r.json())
 const INITIAL_VISIBLE_COUNT = 25
@@ -246,6 +247,7 @@ export function MirrorPage({ embedded = false, socialWindow, onSocialWindowChang
   const [recentDays, setRecentDays] = useState(searchParams.get('recent_days') || '0')
   const [keyword, setKeyword] = useState(searchParams.get('keyword') || '')
   const [search, setSearch] = useState(searchParams.get('search') || '')
+  const tickerOptions = useTickerDatalistOptions(search)
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT)
   const [refreshNonce, setRefreshNonce] = useState(() => Date.now())
   const loadMoreRef = useRef<HTMLDivElement>(null)
@@ -437,7 +439,18 @@ export function MirrorPage({ embedded = false, socialWindow, onSocialWindowChang
           </label>
           <label className="flex items-center gap-1.5 text-xs text-neutral">
             Stock
-            <input value={search} onChange={event => setSearch(event.target.value.toUpperCase())} placeholder="ticker" className="w-[120px] rounded border border-border bg-bg px-2 py-1.5 font-mono text-sm text-white placeholder:text-slate-600 focus:border-accent focus:outline-none" />
+            <input
+              value={search}
+              list="mirror-ticker-universe"
+              onChange={event => setSearch(event.target.value.toUpperCase())}
+              placeholder="ticker"
+              className="w-[120px] rounded border border-border bg-bg px-2 py-1.5 font-mono text-sm text-white placeholder:text-slate-600 focus:border-accent focus:outline-none"
+            />
+            <datalist id="mirror-ticker-universe">
+              {tickerOptions.map(row => (
+                <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+              ))}
+            </datalist>
           </label>
           <button onClick={refresh} className="rounded border border-border px-3 py-1.5 text-xs text-neutral hover:border-accent hover:text-white">
             Refresh
@@ -571,6 +584,10 @@ function MirrorCard({ row, signal, recentDays, keyword, refreshNonce, rollingWin
         return Number.isFinite(parsed) ? parsed : 0
       }).filter(Boolean),
       sent_labels: [],
+      scores: Array.isArray((chart as any)?.sentiment)
+        ? (chart as any).sentiment.map((point: any) => Number(point?.value ?? 0)).filter(Number.isFinite)
+        : socialRows.map((point: any) => Number(point?.sentiment ?? 0)).filter(Number.isFinite),
+      sentiment_weights: socialRows.map((point: any) => Number(point?.count ?? point?.message_count ?? point?.value ?? 0)).filter(Number.isFinite),
       scores_smooth: Array.isArray((chart as any)?.sentiment)
         ? (chart as any).sentiment.map((point: any) => Number(point?.value ?? 0)).filter(Number.isFinite)
         : socialRows.map((point: any) => Number(point?.sentiment ?? 0)).filter(Number.isFinite),
@@ -598,6 +615,24 @@ function MirrorCard({ row, signal, recentDays, keyword, refreshNonce, rollingWin
       watchers,
     }
   }, [candles, chart, rollingWindowMinutes])
+
+  const miniPriceDensity = useMemo(() => {
+    if (!candles.length) return null
+    const density = (chartOverlays.density || []) as LinePoint[]
+    const densityByTime = new Map(density.map(point => [Number(point.time), Number(point.value || 0)]))
+    const source = candles
+      .map((candle: any) => ({
+        time: Number(candle.time),
+        price: Number(candle.close),
+        density: Number(densityByTime.get(Number(candle.time)) || 0),
+      }))
+      .filter(point => Number.isFinite(point.time) && Number.isFinite(point.price) && Number.isFinite(point.density))
+    if (source.length < 2) return null
+    const maxPoints = 96
+    const step = Math.max(1, Math.ceil(source.length / maxPoints))
+    const sampled = source.filter((_, index) => index % step === 0 || index === source.length - 1)
+    return { ticker, rollingWindowMinutes, points: sampled }
+  }, [candles, chartOverlays.density, rollingWindowMinutes, ticker])
 
   const change = displayChange
   const up = Number(change || 0) >= 0
@@ -766,6 +801,7 @@ function MirrorCard({ row, signal, recentDays, keyword, refreshNonce, rollingWin
               single
               embedded
               rollingWindowMinutes={rollingWindowMinutes}
+              miniPriceDensity={miniPriceDensity}
             />
           </div>
         )}

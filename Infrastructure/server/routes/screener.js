@@ -59,6 +59,12 @@ const PREDICTION_HIGH_CONVICTION_REQUIRE_POSTMORTEM_GATES = !['0', 'false', 'no'
 const PREDICTION_THRESHOLD_POLICY_VERSION = predictionThresholdPolicy.PREDICTION_THRESHOLD_POLICY_VERSION
 const PREDICTION_THRESHOLD_POLICY = predictionThresholdPolicy.PREDICTION_THRESHOLD_POLICY
 
+const TICKER_LIST_LIMIT = Math.max(1000, Math.min(12000, Number(process.env.SCREENER_TICKER_LIST_LIMIT || 7000)))
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function normalizeExchange(value) {
   const raw = String(value || '').trim().toUpperCase()
   if (raw === 'NYSEAMERICAN' || raw === 'NYSE AMERICAN') return 'AMEX'
@@ -6182,6 +6188,45 @@ router.get('/audit/:ticker', async (req, res) => {
 })
 
 // GET /api/screener
+router.get('/tickers', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().toUpperCase().replace(/[^A-Z0-9.-]/g, '').slice(0, 12)
+    const requestedLimit = Math.max(1, Math.min(TICKER_LIST_LIMIT, Number(req.query.limit || TICKER_LIST_LIMIT) || TICKER_LIST_LIMIT))
+    const filter = {
+      exchange: { $in: Array.from(US_EXCHANGES) },
+      ticker: { $not: /\./ },
+      price: { $ne: null },
+      ...(q ? { ticker: { $regex: `^${escapeRegExp(q)}`, $options: 'i', $not: /\./ } } : {}),
+    }
+    const rows = (await Screener.find(filter, {
+      _id: 0,
+      ticker: 1,
+      company: 1,
+      exchange: 1,
+      price: 1,
+      quote_status: 1,
+      change_pct: 1,
+    }).sort({ ticker: 1 }).limit(requestedLimit).lean())
+      .map(normalizeScreenerRow)
+      .filter(isCleanListedUsRow)
+
+    res.json({
+      ok: true,
+      total: rows.length,
+      limit: requestedLimit,
+      universe: 'NASDAQ / NYSE / AMEX listed stocks from numeric screeners',
+      tickers: rows.map(row => ({
+        ticker: row.ticker,
+        company: row.company || '',
+        exchange: normalizeExchange(row.exchange),
+        price: row.price ?? null,
+      })),
+    })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: String(err.message || err), tickers: [] })
+  }
+})
+
 router.get('/', async (req, res) => {
   try {
     const { sector, signal, orderBy = 'ticker', orderDir = 'asc', limit = 3000, days = 3 } = req.query

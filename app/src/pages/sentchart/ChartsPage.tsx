@@ -9,6 +9,7 @@ import { ResearchChart, type ResearchMode } from './ResearchChart'
 import { TickerEnrichPanels, type EnrichData } from './TickerEnrichPanels'
 import { resampleCandles, bollingerFromCandles, rsiFromCandles, macdFromCandles, overlaySeries, bucketStart, ROLL_WINDOW_DEFAULT, type SocialSeries } from './chartAgg'
 import type { StrategyMarker, NewsMarker } from './CandlestickChart'
+import { useTickerDatalistOptions } from '@/lib/useTickerUniverse'
 
 // Price-chart bar timeframes. The backend serves ONLY 1-minute extended-hours
 // intraday bars (one session) — no daily/weekly — so the options stop at 1h and
@@ -90,6 +91,20 @@ interface WatcherSeries {
   status?: string
 }
 
+function socialPayloadHasSignal(payload: any) {
+  const messages = Number(payload?.messages || 0)
+  if (messages > 0) return true
+  const series = [
+    payload?.density,
+    payload?.density_smooth,
+    payload?.win_density,
+    payload?.win_density_smooth,
+    payload?.scores,
+    payload?.scores_smooth,
+  ]
+  return series.some(values => Array.isArray(values) && values.some(value => Math.abs(Number(value || 0)) > 0))
+}
+
 function bucketMeanSeries(times: number[] = [], values: number[] = [], tfMin = 1) {
   const buckets = new Map<number, { sum: number; count: number }>()
   times.forEach((time, index) => {
@@ -115,6 +130,7 @@ export function ChartsPage() {
   // aligns candles with the historical social snapshot). Absent = latest session.
   const urlDate = (sp.get('d') || '').trim()
   const [input, setInput] = useState(urlTicker)
+  const tickerOptions = useTickerDatalistOptions(input)
   const [ticker, setTicker] = useState<string | null>(urlTicker || null)
   const [view, setView] = useState<View>('candles')
   const [win, setWin] = useState<Win>('full')
@@ -269,9 +285,11 @@ export function ChartsPage() {
         if (s.error) { setSocialMsg('Social: ' + s.error); return }
         if (s.status === 'walking') { setSocialMsg(`Loading social history, ${s.count || 0} messages…`); timer = window.setTimeout(poll, 1500); return }
         const hasPrimarySeries = Array.isArray(s.labels) && s.labels.length > 0
-        if (!hasPrimarySeries) {
-          s = await fetch(`/api/sentchart/chart/social?${new URLSearchParams({ ticker, date: chartDate })}`).then(r => r.json())
+        const hasPrimarySignal = socialPayloadHasSignal(s)
+        if (!hasPrimarySeries || !hasPrimarySignal) {
+          const fallback = await fetch(`/api/sentchart/chart/social?${new URLSearchParams({ ticker, date: chartDate, window: String(overlayRollingMinutes) })}`).then(r => r.json())
           if (cancelled) return
+          if (socialPayloadHasSignal(fallback) || !hasPrimarySeries) s = fallback
         }
         const hasAnySeries = Array.isArray(s.labels) && s.labels.length > 0
         if (!hasAnySeries) {
@@ -283,9 +301,14 @@ export function ChartsPage() {
         }
         const series: SocialSeries = {
           labels: s.labels || [],
+          times: s.times || [],
           density: s.density || s.win_density || [],
           sent_labels: s.sent_labels || s.labels || [],
+          sent_times: s.sent_times || s.times || [],
+          scores: s.scores || [],
           scores_smooth: s.scores_smooth || [],
+          sentiment_weights: s.sentiment_weights || s.density || [],
+          win_density: s.win_density || s.density || [],
           roll_window: Number(s.window_minutes || s.roll_window || overlayRollingMinutes),
         }
         socialCache.current[key] = series
@@ -392,12 +415,27 @@ export function ChartsPage() {
     if (!arts?.length || !candles.length) return undefined
     const first = candles[0].time
     const last = candles[candles.length - 1].time
-    const out: NewsMarker[] = []
+    const grouped = new Map<number, { bull: number; bear: number; neutral: number; headline?: string }>()
     for (const a of arts) {
       const ts = Number(a.published_at || a.publish_ts || a.detected_at)
       if (!Number.isFinite(ts) || ts < first || ts > last) continue
-      out.push({ time: bucketStart(ts, tf), sentiment: a.sentiment ?? null, headline: a.headline || a.title })
+      const time = bucketStart(ts, tf)
+      const item = grouped.get(time) || { bull: 0, bear: 0, neutral: 0 }
+      const sentiment = a.sentiment === 'bullish' || a.sentiment === 'bearish' ? a.sentiment : 'neutral'
+      if (sentiment === 'bullish') item.bull += 1
+      else if (sentiment === 'bearish') item.bear += 1
+      else item.neutral += 1
+      item.headline ||= a.headline || a.title
+      grouped.set(time, item)
     }
+    const out: NewsMarker[] = Array.from(grouped.entries()).map(([time, item]) => {
+      const sentiment = item.bull > item.bear
+        ? 'bullish'
+        : item.bear > item.bull
+          ? 'bearish'
+          : 'neutral'
+      return { time, sentiment, headline: item.headline, count: item.bull + item.bear + item.neutral }
+    })
     return out.length ? out : undefined
   }, [enrich, priceView, tf])
 
@@ -407,11 +445,17 @@ export function ChartsPage() {
       <div className="flex items-center gap-3 mb-2 flex-wrap">
         <input
           value={input}
+          list="charts-ticker-universe"
           onChange={e => setInput(e.target.value.toUpperCase())}
           onKeyDown={e => e.key === 'Enter' && load()}
           placeholder="Ticker (e.g. AAPL)"
           className="w-[140px] bg-bg border border-border text-sm text-white rounded px-3 py-2 font-mono focus:outline-none focus:border-accent placeholder:text-slate-600"
         />
+        <datalist id="charts-ticker-universe">
+          {tickerOptions.map(row => (
+            <option key={row.ticker} value={row.ticker}>{row.company || row.exchange || row.ticker}</option>
+          ))}
+        </datalist>
         <button
           onClick={load}
           disabled={!input.trim()}

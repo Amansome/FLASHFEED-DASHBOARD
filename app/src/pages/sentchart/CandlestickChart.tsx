@@ -6,11 +6,11 @@ interface BollingerData { upper: Array<{ time: string; value: number }>; lower: 
 interface LinePoint { time: number; value: number }
 // Strategy indicator marker: an entry (up-arrow) or exit (down-arrow) at a given
 // candle time. `price` is informational; the arrow rides above/below the bar.
-export interface StrategyMarker { time: number; type: 'entry' | 'exit'; price: number }
+export interface StrategyMarker { time: number; type: 'entry' | 'exit'; price: number; exit_reason?: string; corr?: number | null }
 
 // News event marker: a dot above the bar at an article's publish time, colored
 // by sentiment. Sourced from the enrich News feed and merged with strategy marks.
-export interface NewsMarker { time: number; sentiment?: 'bullish' | 'bearish' | 'neutral' | null; headline?: string }
+export interface NewsMarker { time: number; sentiment?: 'bullish' | 'bearish' | 'neutral' | null; headline?: string; count?: number }
 
 interface Props {
   candles: Candle[]
@@ -91,7 +91,7 @@ export function CandlestickChart({ candles, bollinger, densityOverlay, sentiment
           lastValueVisible: false,
         })
         volumeSeries.setData(volumeData as any)
-        chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } })
+        chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.88, bottom: 0 } })
       }
 
       // Bollinger bands
@@ -115,11 +115,11 @@ export function CandlestickChart({ candles, bollinger, densityOverlay, sentiment
       // its magnitude never distorts the price axis.
       if (densityOverlay && densityOverlay.length) {
         const dens = chart.addLineSeries({
-          color: '#FF9800', lineWidth: 2, priceScaleId: 'density',
+          color: '#FF9800', lineWidth: 3, priceScaleId: 'density',
           priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
         })
         dens.setData(densityOverlay as any)
-        chart.priceScale('density').applyOptions({ scaleMargins: { top: 0.72, bottom: 0 } })
+        chart.priceScale('density').applyOptions({ scaleMargins: { top: 0.62, bottom: 0.08 } })
       }
 
       // Sentiment overlay (−1..+1, 15-min smoothed) — green, own scale.
@@ -144,16 +144,36 @@ export function CandlestickChart({ candles, bollinger, densityOverlay, sentiment
       // Strategy entry/exit arrows and news event dots share ONE candle series,
       // so they MUST be merged into a SINGLE setMarkers() call.
       const stratMk = (strategyMarkers ?? []).map(m => m.type === 'entry'
-        ? { time: m.time as any, position: 'belowBar' as const, color: '#10b981', shape: 'arrowUp' as const }
-        : { time: m.time as any, position: 'aboveBar' as const, color: '#ef4444', shape: 'arrowDown' as const })
+        ? { time: m.time as any, position: 'belowBar' as const, color: '#10b981', shape: 'arrowUp' as const, text: 'ENTRY' }
+        : {
+            time: m.time as any,
+            position: 'aboveBar' as const,
+            color: m.exit_reason === 'correlation_break' ? '#f59e0b' : '#ef4444',
+            shape: 'arrowDown' as const,
+            text: m.exit_reason === 'correlation_break' ? 'CORR EXIT' : 'EXIT',
+          })
       const newsMk = (newsMarkers ?? []).map(n => ({
         time: n.time as any,
         position: 'aboveBar' as const,
         color: n.sentiment === 'bullish' ? '#10b981'
           : n.sentiment === 'bearish' ? '#ef4444' : '#94a3b8',
         shape: 'circle' as const,
+        text: `${n.sentiment === 'bearish' ? 'BAD' : n.sentiment === 'bullish' ? 'GOOD' : 'NEWS'}${(n.count || 1) > 1 ? ` x${n.count}` : ''}`,
       }))
-      const allMarkers = [...stratMk, ...newsMk].sort((a, b) => (a.time as number) - (b.time as number))
+      const sessionMk = [
+        { hhmm: '09:30', text: 'OPEN', color: '#fb7185', position: 'belowBar' as const },
+        { hhmm: '16:00', text: 'CLOSE', color: '#a78bfa', position: 'aboveBar' as const },
+      ].flatMap(({ hhmm, text, color, position }) => {
+        const [h, m] = hhmm.split(':').map(Number)
+        const hit = candles.find(c => {
+          const t = Number(c.time)
+          if (!Number.isFinite(t)) return false
+          const d = new Date(t * 1000)
+          return d.getUTCHours() === h && d.getUTCMinutes() === m
+        })
+        return hit ? [{ time: hit.time as any, position, color, shape: 'circle' as const, text }] : []
+      })
+      const allMarkers = [...sessionMk, ...stratMk, ...newsMk].sort((a, b) => (a.time as number) - (b.time as number))
       if (allMarkers.length) candleSeries.setMarkers(allMarkers as any)
 
       chart.timeScale().fitContent()

@@ -5,8 +5,9 @@ import { clsx } from 'clsx'
 import type { ExitScreenerRow } from '@/lib/types'
 
 // Exit Screener — simulated positions derived live from the strategy sim in the
-// chart-service (rolling-corr entry, post-entry-peak trailing stop; joined and
-// flattened by /api/exit-screener). The Trailing Stop % slider recalculates
+// chart-service (rolling-corr entry and post-entry-peak trailing stop; joined
+// and flattened by /api/exit-screener). Correlation-break exits are available
+// only when explicitly enabled for validation. The Trailing Stop % slider recalculates
 // stop_price and distance_to_stop_pct CLIENT-SIDE from peak_price/current_price
 // — no refetch, same pattern as the Entry Screener's threshold slider. Rows
 // within 2% of their stop get an amber background.
@@ -24,8 +25,16 @@ const COLUMNS: Array<{ key: string; label: string }> = [
   { key: 'trailing_stop_pct', label: 'TRAILING STOP %' },
   { key: 'stop_price', label: 'STOP PRICE' },
   { key: 'distance_to_stop_pct', label: 'DIST TO STOP' },
+  { key: 'exit_reason', label: 'EXIT REASON' },
   { key: 'status', label: 'STATUS' },
 ]
+
+function exitReasonLabel(value?: string | null): string {
+  if (value === 'price_trailing_stop') return 'Price stop'
+  if (value === 'correlation_break') return 'Corr break'
+  if (value === 'session_end') return 'Session end'
+  return value || '--'
+}
 
 export function ExitScreenerPage() {
   const [stopPct, setStopPct] = useState(5)
@@ -100,10 +109,11 @@ export function ExitScreenerPage() {
             Default 5% is the sweep-optimal value from the professor sweep analysis; provisional, pending validation against the corrected backtest.
           </span>
           <br />
-          Positions are simulated by the Charts strategy (rolling-corr entry at {data?.threshold ?? 0.1}, trailing
-          stop exit). Stop Price = post-entry peak × (1 − stop%). The slider re-derives stop price and distance
-          live; Holding vs Stopped Out reflects the {data?.stopPct ?? 5}% sim. Amber rows are within {NEAR_STOP_PCT}% of
-          their stop.
+          Positions are simulated by the Charts strategy (rolling-corr entry at {data?.threshold ?? 0.1}, trailing stop exit
+          {data?.corrExitThreshold != null ? `, plus correlation-break validation at ${data.corrExitThreshold}` : ''}).
+          Stop Price = post-entry peak x (1 - stop%).
+          The slider re-derives stop price and distance live; Holding vs Stopped Out reflects the {data?.stopPct ?? 5}%
+          sim. Amber rows are within {NEAR_STOP_PCT}% of their stop.
           {warming > 0 && ` · ${warming} ticker${warming > 1 ? 's' : ''} still collecting messages`}
         </div>
       </div>
@@ -169,6 +179,18 @@ export function ExitScreenerPage() {
                       <td className="px-2 py-2 whitespace-nowrap">
                         <span className="font-mono text-white">
                           {row.distance_to_stop_pct != null ? `${row.distance_to_stop_pct.toFixed(2)}%` : '—'}
+                        </span>
+                      </td>
+                      <td className="px-2 py-2 whitespace-nowrap">
+                        <span
+                          className={clsx(
+                            'font-mono',
+                            row.exit_reason === 'correlation_break' ? 'text-amber-300' :
+                              row.exit_reason === 'price_trailing_stop' ? 'text-red-300' : 'text-neutral',
+                          )}
+                          title={row.exit_corr != null ? `Exit corr ${row.exit_corr.toFixed(3)}` : undefined}
+                        >
+                          {exitReasonLabel(row.exit_reason)}
                         </span>
                       </td>
                       <td className="px-2 py-2 whitespace-nowrap">

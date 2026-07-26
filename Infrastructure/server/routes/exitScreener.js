@@ -7,10 +7,12 @@ import { normalizeScreenerRow, isCleanListedUsRow, loadAdaptiveSocialStatsForRow
 //
 // There is no positions store: open/simulated positions are derived live by the
 // chart-service (/api/sentchart/positions/batch), which runs the SAME strategy
-// simulation that draws the chart's entry/exit markers — rolling-corr entry,
-// post-entry peak × (1 − stopPct/100) trailing stop. An entry whose exit is
-// "session_end" is Holding; a "price_trailing_stop" exit is Stopped Out. This
-// route only picks candidates, joins Mongo quote rows, and flattens the trades.
+// simulation that draws the chart's entry/exit markers: rolling-corr entry and
+// post-entry peak x (1 - stopPct/100) trailing stop. A correlation-break exit
+// can be enabled with corrExit for professor-note validation, but it is off by
+// default so this route preserves the chart strategy's trailing-stop behavior.
+// An entry whose exit is "session_end" is Holding; risk exits are Stopped Out.
+// This route only picks candidates, joins Mongo quote rows, and flattens trades.
 //
 // CONFIDENTIALITY BOUNDARY: the entry/exit screeners must never read from or
 // import anything under ~/dev/research-students (confidential student research
@@ -24,6 +26,7 @@ const router = Router()
 const CHART_SERVICE_URL = (process.env.CHART_SERVICE_URL || 'http://localhost:5055').replace(/\/+$/, '')
 const CORR_WINDOW_MINUTES = 360          // strategy rolling window (candidate-selection window too)
 const DEFAULT_ENTRY_THRESHOLD = 0.10     // the strategy's confirmed entry threshold
+const DEFAULT_CORR_EXIT_THRESHOLD = null // optional validation exit; disabled by default
 const UNIVERSE_SCAN_LIMIT = Number(process.env.SCREENER_UNIVERSE_SCAN_LIMIT || 6000)
 const DEFAULT_LIMIT = 30
 const MAX_LIMIT = 50                     // chart-service batch cap
@@ -39,9 +42,16 @@ function round(value, decimals = 2) {
   return Number.isFinite(n) ? Number(n.toFixed(decimals)) : null
 }
 
-async function fetchPositionsBatch(tickers, stopPct, threshold) {
-  const url = `${CHART_SERVICE_URL}/api/sentchart/positions/batch` +
-    `?tickers=${tickers.join(',')}&stop_pct=${stopPct}&threshold=${threshold}`
+async function fetchPositionsBatch(tickers, stopPct, threshold, corrExitThreshold) {
+  const params = new URLSearchParams({
+    tickers: tickers.join(','),
+    stop_pct: String(stopPct),
+    threshold: String(threshold),
+  })
+  if (Number.isFinite(corrExitThreshold)) {
+    params.set('corr_exit_threshold', String(corrExitThreshold))
+  }
+  const url = `${CHART_SERVICE_URL}/api/sentchart/positions/batch?${params.toString()}`
   const controller = new AbortController()
   // A cold batch is one Finviz bars fetch per ticker on the chart-service side;
   // warm batches answer from its 120s row cache.
@@ -60,6 +70,10 @@ router.get('/', async (req, res) => {
   try {
     const stopPct = clamp(req.query.stopPct ?? 5, 5, 30)
     const threshold = clamp(req.query.threshold ?? DEFAULT_ENTRY_THRESHOLD, 0.01, 1)
+    const corrExitRaw = req.query.corrExit ?? req.query.corr_exit_threshold
+    const corrExitThreshold = corrExitRaw == null || corrExitRaw === ''
+      ? DEFAULT_CORR_EXIT_THRESHOLD
+      : clamp(corrExitRaw, -1, 1)
     const limit = Math.round(clamp(req.query.limit ?? DEFAULT_LIMIT, 1, MAX_LIMIT))
 
     // 1. Same clean listed-US universe as /api/screener
@@ -87,7 +101,7 @@ router.get('/', async (req, res) => {
     }
     if (!candidates.length) {
       return res.json({
-        ok: true, stopPct, threshold, count: 0, rows: [],
+        ok: true, stopPct, threshold, corrExitThreshold, count: 0, rows: [],
         sorted_by: 'distance_to_stop_pct asc',
         note: `No tickers with StockTwits activity in the last ${CORR_WINDOW_MINUTES} minutes.`,
       })
@@ -97,7 +111,7 @@ router.get('/', async (req, res) => {
     let positions = {}
     let chartServiceOk = true
     try {
-      positions = await fetchPositionsBatch(candidates.map(c => c.row.ticker), stopPct, threshold)
+      positions = await fetchPositionsBatch(candidates.map(c => c.row.ticker), stopPct, threshold, corrExitThreshold)
     } catch (err) {
       chartServiceOk = false
       console.error('GET /api/exit-screener positions batch failed:', err.message)
@@ -127,6 +141,7 @@ router.get('/', async (req, res) => {
           entry_time: trade.entry_time,
           entry_epoch: trade.entry_epoch,
           entry_corr: trade.entry_corr,
+          exit_corr: trade.exit_corr,
           current_price: currentPrice,
           pnl_pct: trade.entry_price
             ? round(((refPrice - trade.entry_price) / trade.entry_price) * 100, 2)
@@ -140,6 +155,7 @@ router.get('/', async (req, res) => {
           status: trade.status,
           exit_price: trade.status === 'Stopped Out' ? trade.exit_price : null,
           exit_time: trade.status === 'Stopped Out' ? trade.exit_time : null,
+          exit_reason: trade.exit_reason || (trade.status === 'Stopped Out' ? 'risk_exit' : 'session_end'),
           corr_status: result.status,
         })
       }
@@ -150,6 +166,7 @@ router.get('/', async (req, res) => {
       ok: true,
       stopPct,
       threshold,
+      corrExitThreshold,
       chart_service_ok: chartServiceOk,
       count: rows.length,
       tickers_scanned: candidates.length,

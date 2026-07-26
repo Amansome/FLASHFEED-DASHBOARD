@@ -697,7 +697,10 @@ router.get('/recent-lite', async (req, res) => {
     const moverTickers = mover_only === '1' || mover_only === 'true'
       ? await loadPositiveMoverTickers(mover_source)
       : []
-    const scanLimit = Math.max(pageLimit * 20, 300)
+    const tickerOnly = ticker_only === '1' || ticker_only === 'true'
+    const scanLimit = tickerOnly
+      ? Math.max(pageLimit * 100, Math.floor(Number(process.env.ARTICLE_RECENT_LITE_TICKER_SCAN_LIMIT || 3000) || 3000))
+      : Math.max(pageLimit * 20, 300)
     const rawRows = await Article.collection.find({
       suppress_from_main_news: { $ne: true },
       feed_sort_time: { $gte: cutoffSec },
@@ -709,7 +712,6 @@ router.get('/recent-lite', async (req, res) => {
       .maxTimeMS(8_000)
       .toArray()
     const requestedKind = String(article_kind || '').toLowerCase()
-    const tickerOnly = ticker_only === '1' || ticker_only === 'true'
     const articles = rawRows
       .map(row => mapLightweightArticle(row, moverTickers))
       .filter(row => {

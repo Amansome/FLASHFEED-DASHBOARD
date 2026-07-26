@@ -608,24 +608,21 @@ app.get('/api/ai/ticker/:ticker', async (req, res) => {
     const days = Math.min(14, Math.max(1, Number(req.query.days) || 3))
     const socialWindow = Math.min(4320, Math.max(5, Number(req.query.window_minutes) || 1440))
     const sinceSocialSec = Math.floor(Date.now() / 1000) - socialWindow * 60
-    const tickerRegex = `(^|,\\s*)${escapeRegExp(ticker)}(\\s*,|$)`
+    const companyForNews = await loadEnrichTickerCompany(db, ticker)
     const articleMatch = {
-      ...recentArticleMatch(days),
-      ...approvedNewsSourceMongoFilter('source'),
-      $or: [
-        { ticker: { $regex: tickerRegex, $options: 'i' } },
-        { tickers: ticker },
-        { tickers_mentioned: ticker },
+      $and: [
+        recentArticleMatch(days),
+        approvedNewsSourceMongoFilter('source'),
+        enrichArticleCandidateMatch(ticker, companyForNews),
       ],
     }
-    const [movers, arts, model, articles, articleCount, socialRows, predictionRows] = await Promise.all([
+    const [movers, arts, model, articleCandidates, socialRows, predictionRows] = await Promise.all([
       loadPositiveFinvizMoverRows(db, 200),
       aiRecentArticles(db, days),
       loadLatestPredictionModel(db),
       db.collection('articles').find(articleMatch, {
-        projection: { title: 1, source: 1, sentiment: 1, sentiment_score: 1, event_type: 1, sentiment_reason: 1, publish_date: 1, fetched_date: 1, detected_at: 1, url: 1 },
-      }).sort({ publish_date: -1, fetched_date: -1, detected_at: -1 }).limit(20).toArray(),
-      db.collection('articles').countDocuments(articleMatch),
+        projection: ENRICH_ARTICLE_PROJECTION,
+      }).sort({ publish_date: -1, fetched_date: -1, detected_at: -1 }).limit(120).toArray(),
       db.collection('socials').aggregate([
         ...socialTimeStages(),
         { $match: { _event_sec: { $gte: sinceSocialSec }, _ticker_candidates: ticker } },
@@ -637,6 +634,10 @@ app.get('/api/ai/ticker/:ticker', async (req, res) => {
         projection: { _id: 0, signal_id: 1, signal_sec: 1, decision: 1, baseline_signal: 1, threshold_rule_signal: 1, model_signal: 1, label_status: 1, labels: 1, rank: 1 },
       }).sort({ signal_sec: -1 }).limit(20).toArray(),
     ])
+    const articles = articleCandidates
+      .filter(article => enrichArticleMatchesTicker(article, ticker, companyForNews))
+      .slice(0, 20)
+    const articleCount = articles.length
     const mover = movers.find(row => String(row.ticker || '').toUpperCase() === ticker)
     const [articleMap, socialMap, validationMap] = await Promise.all([
       loadArticleStatsForTickers(db, [ticker], days),
@@ -1511,6 +1512,27 @@ function articleSentimentValue(row) {
   const confidence = Number(row.ml_confidence)
   if (Number.isFinite(confidence) && confidence > 0) return clamp(direction * confidence, -1, 1)
   return direction
+}
+
+function socialSentimentScoreExpr() {
+  const numericTypes = ["int", "long", "double", "decimal"]
+  const labelExpr = { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }
+  const sourceLabelExpr = { $toLower: { $toString: { $ifNull: ["$source_sentiment", ""] } } }
+  return {
+    $switch: {
+      branches: [
+        { case: { $in: [{ $type: "$sentiment_score" }, numericTypes] }, then: { $max: [-1, { $min: [1, { $toDouble: "$sentiment_score" }] }] } },
+        { case: { $in: [{ $type: "$sentiment_validation.score" }, numericTypes] }, then: { $max: [-1, { $min: [1, { $toDouble: "$sentiment_validation.score" }] }] } },
+        { case: { $in: [{ $type: "$sentiment" }, numericTypes] }, then: { $max: [-1, { $min: [1, { $toDouble: "$sentiment" }] }] } },
+        { case: { $in: [{ $type: "$source_sentiment_score" }, numericTypes] }, then: { $multiply: [0.65, { $max: [-1, { $min: [1, { $toDouble: "$source_sentiment_score" }] }] }] } },
+        { case: { $regexMatch: { input: labelExpr, regex: "bull|positive" } }, then: 0.58 },
+        { case: { $regexMatch: { input: labelExpr, regex: "bear|negative" } }, then: -0.58 },
+        { case: { $regexMatch: { input: sourceLabelExpr, regex: "bull|positive" } }, then: 0.38 },
+        { case: { $regexMatch: { input: sourceLabelExpr, regex: "bear|negative" } }, then: -0.38 },
+      ],
+      default: 0,
+    },
+  }
 }
 
 function stableHash(value) {
@@ -4144,17 +4166,7 @@ app.get("/api/social/rolling", async (req, res) => {
     pipeline.push(
       {
         $addFields: {
-          _display_sentiment_score: {
-            $switch: {
-              branches: [
-                { case: { $in: [{ $type: "$sentiment_score" }, ["int", "long", "double", "decimal"] ] }, then: { $toDouble: "$sentiment_score" } },
-                { case: { $in: [{ $type: "$sentiment" }, ["int", "long", "double", "decimal"] ] }, then: { $toDouble: "$sentiment" } },
-                { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bull|positive" } }, then: 1 },
-                { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bear|negative" } }, then: -1 },
-              ],
-              default: 0,
-            },
-          },
+          _display_sentiment_score: socialSentimentScoreExpr(),
           _platform_rank: {
             $switch: {
               branches: [
@@ -4435,16 +4447,7 @@ app.get("/api/social/series/:ticker", async (req, res) => {
             bucketSec,
           ],
         },
-        _score: {
-          $switch: {
-            branches: [
-              { case: { $in: [{ $type: "$sentiment_score" }, ["int", "long", "double", "decimal"]] }, then: { $toDouble: "$sentiment_score" } },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bull|positive" } }, then: 1 },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bear|negative" } }, then: -1 },
-            ],
-            default: 0,
-          },
-        },
+        _score: socialSentimentScoreExpr(),
       },
     },
     {
@@ -5164,16 +5167,7 @@ async function chartSocialSeries(db, ticker, windowMinutes, bucketMinutes, optio
     {
       $addFields: {
         _bucket_sec: { $multiply: [{ $floor: { $divide: ["$_event_sec", bucketSec] } }, bucketSec] },
-        _score: {
-          $switch: {
-            branches: [
-              { case: { $in: [{ $type: "$sentiment_score" }, ["int", "long", "double", "decimal"]] }, then: { $toDouble: "$sentiment_score" } },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bull|positive" } }, then: 1 },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bear|negative" } }, then: -1 },
-            ],
-            default: 0,
-          },
-        },
+        _score: socialSentimentScoreExpr(),
       },
     },
     {
@@ -5213,6 +5207,31 @@ async function chartSocialSeries(db, ticker, windowMinutes, bucketMinutes, optio
   }
 
   return addSessionScaledSocialFields(filled, bucketMinutes)
+}
+
+function trailingSocialWindow(rows, windowMinutes, bucketMinutes) {
+  const span = Math.max(1, Math.floor(Number(windowMinutes || 1) / Math.max(1, Number(bucketMinutes || 1))))
+  const rollingCount = []
+  const rollingSentiment = []
+  let countSum = 0
+  let scoreSum = 0
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i] || {}
+    const count = Number(row.message_count || 0)
+    const sentiment = Number(row.sentiment || 0)
+    countSum += count
+    scoreSum += sentiment * count
+    const dropAt = i - span - 1
+    if (dropAt >= 0) {
+      const old = rows[dropAt] || {}
+      const oldCount = Number(old.message_count || 0)
+      countSum -= oldCount
+      scoreSum -= Number(old.sentiment || 0) * oldCount
+    }
+    rollingCount.push(Number(countSum.toFixed(3)))
+    rollingSentiment.push(countSum > 0 ? Number((scoreSum / countSum).toFixed(4)) : 0)
+  }
+  return { rollingCount, rollingSentiment }
 }
 
 function emptyChartSocialSeries(startSec, endSec, bucketMinutes) {
@@ -5482,16 +5501,19 @@ app.get("/api/chart/social", async (req, res) => {
     const density = rows.map(r => Number(r.message_count ?? 0))
     const densityPerMinute = rows.map(r => Number(r.message_density ?? 0))
     const scores = rows.map(r => Number(r.sentiment ?? 0))
+    const { rollingCount, rollingSentiment } = trailingSocialWindow(rows, windowMinutes, bucketMinutes)
     const messages = rows.reduce((a, r) => a + Number(r.message_count ?? 0), 0)
     const bullish = rows.reduce((a, r) => a + Number(r.bullish ?? 0), 0)
     const bearish = rows.reduce((a, r) => a + Number(r.bearish ?? 0), 0)
     res.json({
       status: "ok", source: messages ? "feedflash-social" : "feedflash-social-empty-window", messages, bullish, bearish, complete: true,
-      labels, times, density, density_smooth: density, density_per_minute: densityPerMinute,
-      sent_labels: labels, sent_times: times, scores, scores_smooth: scores,
-      win_density: density, win_density_smooth: density, window_minutes: windowMinutes, bucket_minutes: bucketMinutes,
+      labels, times, density, density_smooth: rollingCount, density_per_minute: densityPerMinute,
+      sent_labels: labels, sent_times: times, scores, scores_smooth: rollingSentiment, sentiment_weights: density,
+      win_density: rollingCount, win_density_smooth: rollingCount, win_sentiment: rollingSentiment, win_sentiment_smooth: rollingSentiment,
+      window_minutes: windowMinutes, bucket_minutes: bucketMinutes,
       density_unit: "raw_messages_per_bucket",
       density_per_minute_unit: "messages_per_minute",
+      sentiment_unit: "message_weighted_trailing_window_score",
     })
   } catch (err) {
     res.status(500).json({ error: String(err.message || err) })
@@ -5566,21 +5588,7 @@ async function tickerSocialPlatformMetric(db, ticker, platform, windowHours = 72
         _ticker_candidates: ticker,
       },
     },
-    {
-      $addFields: {
-        _score: {
-          $switch: {
-            branches: [
-              { case: { $in: [{ $type: "$sentiment_score" }, ["int", "long", "double", "decimal"]] }, then: { $toDouble: "$sentiment_score" } },
-              { case: { $in: [{ $type: "$sentiment" }, ["int", "long", "double", "decimal"]] }, then: { $toDouble: "$sentiment" } },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bull|positive" } }, then: 1 },
-              { case: { $regexMatch: { input: { $toLower: { $toString: { $ifNull: ["$sentiment", ""] } } }, regex: "bear|negative" } }, then: -1 },
-            ],
-            default: 0,
-          },
-        },
-      },
-    },
+    { $addFields: { _score: socialSentimentScoreExpr() } },
     {
       $group: {
         _id: null,
@@ -5642,6 +5650,136 @@ async function tickerSocialRumor(db, ticker, windowHours = 72) {
   }
 }
 
+const ENRICH_ARTICLE_PROJECTION = {
+  title: 1,
+  headline: 1,
+  summary: 1,
+  bodyText: 1,
+  company: 1,
+  source: 1,
+  url: 1,
+  ticker: 1,
+  tickers: 1,
+  tickers_mentioned: 1,
+  matched_mover_tickers: 1,
+  symbol: 1,
+  publish_date: 1,
+  fetched_date: 1,
+  detected_at: 1,
+  createdAt: 1,
+  sentiment: 1,
+  sentiment_score: 1,
+  finbert_score: 1,
+  vader_score: 1,
+  ml_confidence: 1,
+}
+
+const ENRICH_COMPANY_STOP_WORDS = new Set([
+  "inc", "corp", "corporation", "company", "limited", "ltd", "holdings", "holding",
+  "group", "plc", "class", "common", "stock", "american", "technologies", "technology",
+  "therapeutics", "pharmaceuticals", "biopharma", "systems", "international",
+  "ordinary", "shares", "share", "depositary", "adr", "new", "the",
+])
+
+function enrichCompanyTokens(company = "") {
+  return String(company || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter(token => token.length >= 4 && !ENRICH_COMPANY_STOP_WORDS.has(token))
+    .slice(0, 5)
+}
+
+function enrichArticleTickerValues(article = {}) {
+  const values = new Set()
+  const push = (value) => {
+    if (Array.isArray(value)) return value.forEach(push)
+    String(value || "").split(/[,\s$]+/).forEach(part => {
+      const ticker = normalizeTickerList([part], 1, { ensurePrivate: false })[0] || ""
+      if (ticker) values.add(ticker)
+    })
+  }
+  push(article.ticker)
+  push(article.tickers)
+  push(article.tickers_mentioned)
+  push(article.matched_mover_tickers)
+  push(article.symbol)
+  return Array.from(values)
+}
+
+function enrichArticleText(article = {}) {
+  return [
+    article.title,
+    article.headline,
+    article.summary,
+    article.bodyText,
+    article.company,
+    article.url,
+  ].filter(Boolean).join(" ")
+}
+
+function enrichExplicitTickerRegex(ticker) {
+  const escaped = escapeRegExp(ticker)
+  return new RegExp(`(\\$${escaped}\\b|\\b(?:nasdaq|nyse|amex|otc|ticker|symbol)\\s*[:\\-]?\\s*${escaped}\\b|\\(${escaped}\\))`, "i")
+}
+
+function enrichLooseTickerRegex(ticker) {
+  return new RegExp(`(^|[,\\s$])\\$?${escapeRegExp(ticker)}(?=$|[,\\s])`, "i")
+}
+
+function enrichArticleMatchesTicker(article, ticker, company = "") {
+  const stored = enrichArticleTickerValues(article)
+  if (stored.includes(ticker)) return true
+  const text = enrichArticleText(article)
+  if (enrichExplicitTickerRegex(ticker).test(text)) return true
+  const lower = text.toLowerCase()
+  const tokens = enrichCompanyTokens(company)
+  return tokens.length > 0 && tokens.some(token => lower.includes(token))
+}
+
+async function loadEnrichTickerCompany(db, ticker) {
+  try {
+    const row = await db.collection("screeners").findOne(
+      { ticker },
+      { projection: { _id: 0, company: 1 }, sort: { updated_at: -1, quote_updated_at: -1 } },
+    )
+    return row?.company || ""
+  } catch (_) {
+    return ""
+  }
+}
+
+function enrichArticleCandidateMatch(ticker, company = "") {
+  const tickerRe = enrichLooseTickerRegex(ticker)
+  const explicitRe = enrichExplicitTickerRegex(ticker)
+  const companyClauses = enrichCompanyTokens(company).map(token => {
+    const tokenRe = new RegExp(`\\b${escapeRegExp(token)}\\b`, "i")
+    return {
+      $or: [
+        { title: { $regex: tokenRe } },
+        { headline: { $regex: tokenRe } },
+        { summary: { $regex: tokenRe } },
+        { company: { $regex: tokenRe } },
+      ],
+    }
+  })
+  return {
+    $or: [
+      { ticker: { $regex: tickerRe } },
+      { tickers: ticker },
+      { tickers_mentioned: ticker },
+      { matched_mover_tickers: ticker },
+      { symbol: ticker },
+      { title: { $regex: explicitRe } },
+      { headline: { $regex: explicitRe } },
+      { summary: { $regex: explicitRe } },
+      { company: { $regex: explicitRe } },
+      ...companyClauses,
+    ],
+  }
+}
+
 app.get("/api/ticker/:ticker/enrich", async (req, res) => {
   const ticker = normalizeTickerList([req.params.ticker], 1, { ensurePrivate: false })[0] || ""
   const ENRICH_DAYS = 3
@@ -5653,20 +5791,24 @@ app.get("/api/ticker/:ticker/enrich", async (req, res) => {
   try {
     const db = mongoose.connection.db
     if (!db || !ticker) return res.json(empty)
-    const tickerRe = new RegExp(`(^|,)\\s*${escapeRegExp(ticker)}\\s*(,|$)`, "i")
+    const company = await loadEnrichTickerCompany(db, ticker)
     let docs = []
     try {
       docs = await db.collection("articles").find(
         {
           $and: [
             recentArticleMatch(ENRICH_DAYS),
-            { $or: [{ ticker }, { ticker: tickerRe }, { tickers: ticker }, { symbol: ticker }] },
+            approvedNewsSourceMongoFilter("source"),
+            enrichArticleCandidateMatch(ticker, company),
           ],
         },
-        { projection: { title: 1, source: 1, url: 1, publish_date: 1, fetched_date: 1, detected_at: 1, createdAt: 1, sentiment: 1, sentiment_score: 1, finbert_score: 1, vader_score: 1, ml_confidence: 1 } },
-      ).sort({ publish_date: -1, fetched_date: -1, detected_at: -1, _id: -1 }).limit(40).toArray()
+        { projection: ENRICH_ARTICLE_PROJECTION },
+      ).sort({ publish_date: -1, fetched_date: -1, detected_at: -1, _id: -1 }).limit(120).toArray()
     } catch (_) { docs = [] }
-    const articles = docs.map((d, i) => {
+    const verifiedDocs = docs
+      .filter(d => enrichArticleMatchesTicker(d, ticker, company))
+      .slice(0, 40)
+    const articles = verifiedDocs.map((d, i) => {
       const when = d.publish_date || d.fetched_date || d.detected_at || d.createdAt
       const sec = timestampSeconds(when) || null
       const explicitScore = Number(d.sentiment_score ?? d.finbert_score ?? d.vader_score)
@@ -5675,7 +5817,7 @@ app.get("/api/ticker/:ticker/enrich", async (req, res) => {
         : (d.sentiment === "bullish" ? (d.ml_confidence ?? 0.5) : d.sentiment === "bearish" ? -(d.ml_confidence ?? 0.5) : 0)
       return {
         id: String(d._id || `a-${i}`),
-        headline: d.title || "(untitled)",
+        headline: d.title || d.headline || "(untitled)",
         source: d.source || "unknown",
         url: d.url && d.url !== "#" ? d.url : null,
         published_at: sec,

@@ -1255,6 +1255,12 @@ function evidenceSnapshotAt(timeline = new Map(), ticker = '', timestamp = 0, fa
   const ts = Number(timestamp || 0)
   const windowSec = Math.max(900, Number(windowMinutes || 60) * 60)
   const start = ts - windowSec
+  const pointWindowMeta = {
+    sourceSocialWindowStart: isoFromSec(start),
+    sourceSocialWindowEnd: isoFromSec(ts),
+    sourceNewsWindowStart: isoFromSec(start),
+    sourceNewsWindowEnd: isoFromSec(ts),
+  }
   const events = rows.filter(event => Number(event.timestamp || 0) <= ts && Number(event.timestamp || 0) >= start)
   if (!events.length) {
     return {
@@ -1265,6 +1271,7 @@ function evidenceSnapshotAt(timeline = new Map(), ticker = '', timestamp = 0, fa
       newsDensityPerHour: 0,
       socialDensityPerHour: 0,
       evidenceWindowMinutes: Math.round(windowSec / 60),
+      ...pointWindowMeta,
     }
   }
   let weighted = 0
@@ -1288,18 +1295,21 @@ function evidenceSnapshotAt(timeline = new Map(), ticker = '', timestamp = 0, fa
     newsDensityPerHour: Number((news / hours).toFixed(3)),
     socialDensityPerHour: Number((social / hours).toFixed(3)),
     evidenceWindowMinutes: Math.round(windowSec / 60),
+    ...pointWindowMeta,
   }
 }
 
 async function rollingVolumeEvidence(db, tickers, windowHours = DEFAULT_THRESHOLDS.rollingWindowHours) {
   const windowSec = Math.round(Math.max(5 / 60, Number(windowHours || DEFAULT_THRESHOLDS.rollingWindowHours)) * 3600)
   const sinceSec = Math.floor(Date.now() / 1000) - windowSec
-  const snapshots = await db.collection('finviz_momentum_snapshots')
-    .find({ snapshot_sec: { $gte: sinceSec } }, { projection: { snapshot_sec: 1, rows: 1 } })
-    .sort({ snapshot_sec: -1 })
-    .limit(Math.max(12, Math.ceil(windowSec / DECISION_MAP_POINT_INTERVAL_SECONDS) + 4))
-    .toArray()
   const wanted = new Set(tickers)
+  const snapshots = await filteredMomentumSnapshots(
+    db,
+    wanted,
+    sinceSec,
+    Math.max(12, Math.ceil(windowSec / DECISION_MAP_POINT_INTERVAL_SECONDS) + 4),
+    -1,
+  )
   const map = new Map()
   for (const snapshot of snapshots.reverse()) {
     for (const row of snapshot.rows || []) {
@@ -1321,6 +1331,34 @@ async function rollingVolumeEvidence(db, tickers, windowHours = DEFAULT_THRESHOL
     })
   }
   return result
+}
+
+async function filteredMomentumSnapshots(db, tickers = new Set(), sinceSec = 0, limit = 120, sortDir = -1) {
+  if (!db || !tickers?.size) return []
+  const wantedTickers = [...tickers].map(normalizeTicker).filter(Boolean)
+  if (!wantedTickers.length) return []
+  return db.collection('finviz_momentum_snapshots').aggregate([
+    { $match: { snapshot_sec: { $gte: sinceSec } } },
+    { $sort: { snapshot_sec: sortDir >= 0 ? 1 : -1 } },
+    { $limit: Math.max(1, Number(limit) || 120) },
+    {
+      $project: {
+        snapshot_sec: 1,
+        rows: {
+          $filter: {
+            input: { $ifNull: ['$rows', []] },
+            as: 'row',
+            cond: {
+              $in: [
+                { $toUpper: { $ifNull: ['$$row.ticker', ''] } },
+                wantedTickers,
+              ],
+            },
+          },
+        },
+      },
+    },
+  ], { allowDiskUse: true }).toArray()
 }
 
 function quadrantFor(combinedSentiment, priceChangePct, thresholds) {
@@ -1806,14 +1844,17 @@ function latestMarketMovementDateKey(points = []) {
   return keys[keys.length - 1] || ''
 }
 
-function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.pathWindowHours) {
+function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.pathWindowHours, marketDayOnly = false) {
   const sorted = [...points]
     .filter(point => point && Number.isFinite(Number(point.timestamp || 0)))
     .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0))
   const windowSec = Math.round(Math.max(5 / 60, Number(windowHours || DEFAULT_THRESHOLDS.pathWindowHours)) * 3600)
   const latestPointSec = Number(sorted[sorted.length - 1]?.timestamp || 0)
   const windowStartSec = latestPointSec ? latestPointSec - windowSec : 0
-  const windowed = windowStartSec ? sorted.filter(point => Number(point.timestamp || 0) >= windowStartSec) : sorted
+  const marketSorted = marketDayOnly ? sorted.filter(point => isLikelyMarketMovementDate(point.timestamp)) : sorted
+  const effectiveLatestSec = Number(marketSorted[marketSorted.length - 1]?.timestamp || latestPointSec || 0)
+  const effectiveWindowStartSec = effectiveLatestSec ? effectiveLatestSec - windowSec : windowStartSec
+  const windowed = effectiveWindowStartSec ? marketSorted.filter(point => Number(point.timestamp || 0) >= effectiveWindowStartSec) : marketSorted
   const groups = new Map()
   for (const point of windowed) {
     const key = isLikelyMarketMovementDate(point.timestamp) ? nyDateKey(point.timestamp) : ''
@@ -1825,7 +1866,7 @@ function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.
   const days = [...groups.entries()].sort((a, b) => b[0].localeCompare(a[0]))
   if (!days.length) {
     const allGroups = new Map()
-    for (const point of sorted) {
+    for (const point of marketSorted) {
       const key = isLikelyMarketMovementDate(point.timestamp) ? nyDateKey(point.timestamp) : ''
       if (!key) continue
       const rows = allGroups.get(key) || []
@@ -1845,8 +1886,8 @@ function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.
         quality: selectedRows.length >= DECISION_MAP_MIN_FULL_PATH_POINTS ? 'full' : selectedRows.length >= DECISION_MAP_SPARSE_PATH_THRESHOLD ? 'partial' : 'sparse',
         requestedWindowHours: Number((windowSec / 3600).toFixed(3)),
         requestedWindowUsed: formatWindowHours(windowSec / 3600),
-        windowStartSec: Number(selectedRows[0]?.timestamp || 0) || windowStartSec,
-        windowEndSec: Number(selectedRows[selectedRows.length - 1]?.timestamp || 0) || latestPointSec || null,
+        windowStartSec: Number(selectedRows[0]?.timestamp || 0) || effectiveWindowStartSec,
+        windowEndSec: Number(selectedRows[selectedRows.length - 1]?.timestamp || 0) || effectiveLatestSec || null,
         availableMarketDates: allDays.map(([date, rows]) => ({ date, points: rows.length })).slice(0, 6),
       }
     }
@@ -1857,8 +1898,8 @@ function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.
       quality: windowed.length >= DECISION_MAP_MIN_FULL_PATH_POINTS ? 'partial' : windowed.length >= DECISION_MAP_SPARSE_PATH_THRESHOLD ? 'sparse' : 'minimal',
       requestedWindowHours: Number((windowSec / 3600).toFixed(3)),
       requestedWindowUsed: formatWindowHours(windowSec / 3600),
-      windowStartSec,
-      windowEndSec: latestPointSec || null,
+      windowStartSec: effectiveWindowStartSec,
+      windowEndSec: effectiveLatestSec || null,
     }
   }
 
@@ -1881,8 +1922,8 @@ function selectPathMovementWindow(points = [], windowHours = DEFAULT_THRESHOLDS.
     quality,
     requestedWindowHours: Number((windowSec / 3600).toFixed(3)),
     requestedWindowUsed: formatWindowHours(windowSec / 3600),
-    windowStartSec,
-    windowEndSec: latestPointSec || null,
+    windowStartSec: Number(selectedRows[0]?.timestamp || 0) || effectiveWindowStartSec,
+    windowEndSec: Number(selectedRows[selectedRows.length - 1]?.timestamp || 0) || effectiveLatestSec || null,
     availableMarketDates: days.map(([date, rows]) => ({ date, points: rows.length })).slice(0, 6),
   }
 }
@@ -2129,6 +2170,10 @@ async function chartCandlePathEvidence(db, scoredRows = [], maxPoints = 120, win
         chartBarTime: isoFromSec(candle.time),
         combinedSentiment: evidence.combinedSentiment,
         sentimentEstimated: evidence.sentimentEstimated,
+        sourceSocialWindowStart: evidence.sourceSocialWindowStart,
+        sourceSocialWindowEnd: evidence.sourceSocialWindowEnd,
+        sourceNewsWindowStart: evidence.sourceNewsWindowStart,
+        sourceNewsWindowEnd: evidence.sourceNewsWindowEnd,
         evidenceEventCount: evidence.evidenceEventCount,
         messageDensityPerHour: evidence.messageDensityPerHour,
         newsDensityPerHour: evidence.newsDensityPerHour,
@@ -2172,10 +2217,10 @@ function annotatePathWindowPoint(point = {}, row = {}, selectedWindow = {}) {
     timestampUtc: point.timestampUtc || isoFromSec(timestamp),
     displayTime: point.displayTime || displayTimeFromSec(timestamp),
     rollingWindowUsed: row.rollingWindowUsed || selectedWindow.requestedWindowUsed || point.rollingWindowUsed,
-    sourceSocialWindowStart: row.sourceSocialWindowStart || point.sourceSocialWindowStart,
-    sourceSocialWindowEnd: row.sourceSocialWindowEnd || point.sourceSocialWindowEnd,
-    sourceNewsWindowStart: row.sourceNewsWindowStart || point.sourceNewsWindowStart,
-    sourceNewsWindowEnd: row.sourceNewsWindowEnd || point.sourceNewsWindowEnd,
+    sourceSocialWindowStart: point.sourceSocialWindowStart || row.sourceSocialWindowStart,
+    sourceSocialWindowEnd: point.sourceSocialWindowEnd || row.sourceSocialWindowEnd,
+    sourceNewsWindowStart: point.sourceNewsWindowStart || row.sourceNewsWindowStart,
+    sourceNewsWindowEnd: point.sourceNewsWindowEnd || row.sourceNewsWindowEnd,
     chartBarTime: point.chartBarTime || isoFromSec(timestamp),
   }
 }
@@ -2193,12 +2238,9 @@ async function tickerPathEvidence(db, scoredRows = [], maxPoints = 14, redis = n
     const existing = [...(redisPaths.get(ticker) || []), ...(mongoPointPaths.get(ticker) || [])]
     return existing.length < maxPoints || !pathHasVisibleMovement(existing)
   }))
-  const snapshots = tickersNeedingSnapshots.size ? await db.collection('finviz_momentum_snapshots')
-    .find({ snapshot_sec: { $gte: sinceSec } }, { projection: { snapshot_sec: 1, rows: 1 } })
-    .sort({ snapshot_sec: -1 })
-    .limit(Math.max(12, maxPoints * 4))
-    .toArray()
-    .catch(() => []) : []
+  const snapshots = tickersNeedingSnapshots.size
+    ? await filteredMomentumSnapshots(db, tickersNeedingSnapshots, sinceSec, Math.max(12, maxPoints * 4), -1).catch(() => [])
+    : []
 
   const map = new Map()
   for (const [ticker, points] of redisPaths.entries()) {
@@ -2284,7 +2326,7 @@ async function tickerPathEvidence(db, scoredRows = [], maxPoints = 14, redis = n
         convictionScore: row.convictionScore,
       }, row))
     }
-    const selectedWindow = selectPathMovementWindow(points, pathWindowHours)
+    const selectedWindow = selectPathMovementWindow(points, pathWindowHours, marketDayOnly)
     const pathPoints = compactPathPoints(selectedWindow.points, maxPoints)
       .map(point => annotatePathWindowPoint(point, row, selectedWindow))
     const pathIdentity = analyzeDecisionMapPath(pathPoints, ticker)
@@ -2360,6 +2402,9 @@ async function loadHotDecisionMap(req, db) {
     ])
     const parsed = raw ? JSON.parse(raw) : null
     if (parsed?.ok && Array.isArray(parsed.rows)) {
+      if (!parsed.rows.length && !req.query.search && !req.query.ticker && !req.query.focusTicker) {
+        return null
+      }
       // Return cached payload as-is (no additional MongoDB queries)
       // The payload already includes path_points from the previous build
       const builtAt = parsed.builtAt || parsed.generatedAt || parsed.hot_data?.snapshot_at || null

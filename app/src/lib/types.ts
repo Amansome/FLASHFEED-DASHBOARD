@@ -566,6 +566,8 @@ export interface ExitScreenerRow {
   status?:              'Holding' | 'Stopped Out' | string
   exit_price?:          number | null
   exit_time?:           string | null
+  exit_reason?:         'price_trailing_stop' | 'correlation_break' | 'session_end' | string
+  exit_corr?:           number | null
   corr_status?:         string
 }
 

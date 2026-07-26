@@ -1,5 +1,6 @@
 import useSWR, { useSWRConfig } from 'swr'
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
 import { clsx } from 'clsx'
 import { StatusBadge } from './StatusBadge'
@@ -161,6 +162,8 @@ export function TopBar() {
   const [showStorage, setShowStorage] = useState(false)
   const [showControls, setShowControls] = useState(false)
   const [showMoreNav, setShowMoreNav] = useState(false)
+  const moreNavButtonRef = useRef<HTMLButtonElement | null>(null)
+  const [moreNavPosition, setMoreNavPosition] = useState<{ top: number; left: number } | null>(null)
   const [lastAutoResult, setLastAutoResult] = useState<{ new?: number; updated?: number; ms?: number; at: number } | null>(null)
   const [autoStatus, setAutoStatus] = useState<{ text: string; at: number; nextAt?: number | null; running?: boolean; skipped?: boolean; error?: boolean } | null>(null)
   const [autoQueueStartedAt, setAutoQueueStartedAt] = useState<number | null>(null)
@@ -201,6 +204,34 @@ export function TopBar() {
     const timer = window.setInterval(() => setServerProgressNowMs(Date.now()), 1000)
     return () => window.clearInterval(timer)
   }, [autoRefreshStatus?.onsite_fetch?.enabled])
+
+  useEffect(() => {
+    if (!showMoreNav) return
+    const updatePosition = () => {
+      const rect = moreNavButtonRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const menuWidth = 192
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8))
+      const top = Math.max(8, rect.bottom + 8)
+      setMoreNavPosition({ top, left })
+    }
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (target && moreNavButtonRef.current?.contains(target)) return
+      const menu = document.getElementById('flashfeed-more-nav-menu')
+      if (target && menu?.contains(target)) return
+      setShowMoreNav(false)
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+    }
+  }, [showMoreNav])
 
   const revalidateDashboardData = useCallback(() => {
     mutate(
@@ -414,6 +445,36 @@ export function TopBar() {
   const serverAutoTitle = serverAutoOn
     ? `Backend auto-refresh is ${serverAutoRunning ? 'currently running' : 'enabled'} · refresh lock ${backendRefreshInFlight ? 'active' : 'clear'} · dashboard ${serverAuto.dashboard_present ? 'present' : 'absent'} · next due ${serverAuto.next_due_at || 'waiting'} · market ${autoRefreshStatus?.market?.label || 'unknown'}`
     : 'Backend auto-refresh is disabled'
+  const moreNavMenu = showMoreNav && typeof document !== 'undefined'
+    ? createPortal(
+      <div
+        id="flashfeed-more-nav-menu"
+        className="fixed z-[1000] w-48 overflow-y-auto rounded-lg border border-border bg-surface p-1 shadow-2xl shadow-black/40"
+        style={{
+          top: moreNavPosition?.top ?? 56,
+          left: moreNavPosition?.left ?? 0,
+          maxHeight: `calc(100vh - ${(moreNavPosition?.top ?? 56) + 8}px)`,
+        }}
+      >
+        {MORE_NAV.map(({ href, label }) => (
+          <NavLink
+            key={href}
+            to={href}
+            onMouseEnter={() => prefetchRoute(href)}
+            onFocus={() => prefetchRoute(href)}
+            onClick={() => setShowMoreNav(false)}
+            className={({ isActive }) => clsx(
+              'block rounded px-3 py-2 text-xs transition-colors',
+              isActive ? 'bg-accent/15 text-white' : 'text-neutral hover:bg-bg hover:text-white'
+            )}
+          >
+            {label}
+          </NavLink>
+        ))}
+      </div>,
+      document.body
+    )
+    : null
 
   return (
     <>
@@ -465,6 +526,7 @@ export function TopBar() {
             })}
             <div className="relative flex-none">
               <button
+                ref={moreNavButtonRef}
                 onMouseEnter={() => MORE_NAV.forEach(({ href }) => prefetchRoute(href))}
                 onFocus={() => MORE_NAV.forEach(({ href }) => prefetchRoute(href))}
                 onClick={() => setShowMoreNav(v => !v)}
@@ -477,25 +539,6 @@ export function TopBar() {
               >
                 More
               </button>
-              {showMoreNav && (
-                <div className="absolute left-0 top-full z-50 mt-2 w-40 rounded-lg border border-border bg-surface p-1 shadow-xl">
-                  {MORE_NAV.map(({ href, label }) => (
-                    <NavLink
-                      key={href}
-                      to={href}
-                      onMouseEnter={() => prefetchRoute(href)}
-                      onFocus={() => prefetchRoute(href)}
-                      onClick={() => setShowMoreNav(false)}
-                      className={({ isActive }) => clsx(
-                        'block rounded px-3 py-2 text-xs transition-colors',
-                        isActive ? 'bg-accent/15 text-white' : 'text-neutral hover:bg-bg hover:text-white'
-                      )}
-                    >
-                      {label}
-                    </NavLink>
-                  ))}
-                </div>
-              )}
             </div>
           </nav>
 
@@ -668,6 +711,7 @@ export function TopBar() {
           })}
         </nav>
       </header>
+      {moreNavMenu}
       <SentimentModal open={showSentiment} onClose={() => setShowSentiment(false)} />
     </>
   )
