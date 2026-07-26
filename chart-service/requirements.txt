@@ -8,5 +8,20 @@ pymongo==4.17.0   # phase-2b: social_store resting store (in-memory fallback if 
 # Unofficial websocket datafeed — OPTIONAL: the service runs without it and the
 # chart falls back to a dashed prior-close carry overnight. Needs TV_USERNAME /
 # TV_PASSWORD env vars (owner's paid TradingView account) on the deploy host.
-tvDatafeed @ git+https://github.com/rongardF/tvdatafeed.git
+#
+# PINNED TO A COMMIT ON PURPOSE — do not loosen this back to a bare branch URL.
+# The package has no PyPI release and no tags, so an unpinned git URL resolves to
+# whatever main happens to be at build time: two rebuilds of the same commit of
+# THIS repo could ship different datafeed code. That matters more here than for a
+# normal dependency, because tv_overnight.py depends on an undocumented detail of
+# this package — its index is built with datetime.fromtimestamp(), i.e. naive
+# host-local time — and reading that wrong is exactly what silently mislabeled
+# the prior session's post-market as overnight data (see tv_overnight.py's
+# timezone note). An upstream change to timestamp handling must break the build
+# loudly at bump time, not appear as quietly wrong prices on the chart.
+#
+# e6f6aaa = upstream main @ 2026-07-26, the build verified against real Finviz
+# data (alignment guard: 0.000% aligned, catches a +4h shift at 1.303%).
+# To bump: change the hash, rebuild, and re-run that verification before shipping.
+tvDatafeed @ git+https://github.com/rongardF/tvdatafeed.git@e6f6aaa7de439ac6e454d9b26d2760ded8dc4923
 websocket-client==1.8.0
