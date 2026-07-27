@@ -4,7 +4,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run typecheck:ratchet && vite build",
+    "build:no-typecheck": "vite build",
+    "typecheck": "tsc --noEmit",
+    "typecheck:ratchet": "node scripts/typecheck-ratchet.mjs",
+    "typecheck:accept": "node scripts/typecheck-ratchet.mjs --accept",
     "preview": "vite preview",
     "server": "node index.js",
     "server:dev": "nodemon index.js",
