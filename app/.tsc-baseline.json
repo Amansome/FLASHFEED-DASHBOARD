@@ -1,7 +1,6 @@
 {
-  "total": 59,
+  "total": 54,
   "signatures": {
-    "src/components/shared/TickerDetailModal.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/components/shared/Toast.tsx|TS2503|Cannot find namespace 'NodeJS'.": 1,
     "src/components/shared/TopBar.tsx|TS2339|Property 'refreshed_articles' does not exist on type '{ new_articles?: number | undefined; updated_articles?: number | undefined; unchanged_articles?: number | undefined; total_articles?: number | undefined; ms?: number | undefined; }'.": 2,
     "src/components/shared/TopBar.tsx|TS6133|'autoLabel' is declared but its value is never read.": 1,
@@ -15,7 +14,6 @@
     "src/pages/ChartsGridPage.tsx|TS6133|'secondsFromTimestamp' is declared but its value is never read.": 1,
     "src/pages/ChartsGridPage.tsx|TS6133|'signal' is declared but its value is never read.": 1,
     "src/pages/DecisionMapPanel.tsx|TS2345|Argument of type '{ timestamp: number; time?: number | undefined; timestampUtc?: string | undefined; displayTime?: string | undefined; rollingWindowUsed?: string | undefined; sourceSocialWindowStart?: string | undefined; ... 25 more ...; evidenceWindowMinutes?: number | ... 1 more ... | undefined; }' is not assignable to parameter of type 'VolumePointLike'.": 4,
-    "src/pages/DecisionMapPanel.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/pages/DecisionMapPanel.tsx|TS6133|'ageLabel' is declared but its value is never read.": 1,
     "src/pages/DecisionMapPanel.tsx|TS6133|'autoZoomForMarketCap' is declared but its value is never read.": 1,
     "src/pages/DecisionMapPanel.tsx|TS6133|'DetailRow' is declared but its value is never read.": 1,
@@ -39,11 +37,8 @@
     "src/pages/MirrorPage.tsx|TS7006|Parameter 'index' implicitly has an 'any' type.": 1,
     "src/pages/MirrorPage.tsx|TS7006|Parameter 'point' implicitly has an 'any' type.": 1,
     "src/pages/MomentumPage.tsx|TS2339|Property 'exchange' does not exist on type 'MomentumRow'.": 1,
-    "src/pages/MomentumPage.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
-    "src/pages/OverviewPage.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/pages/OverviewPage.tsx|TS7031|Binding element 'phrase' implicitly has an 'any' type.": 1,
     "src/pages/PredictionAuditPage.tsx|TS2339|Property 'source' does not exist on type 'AuditRow'.": 1,
-    "src/pages/ScreenerFilterPanel.tsx|TS6133|'k' is declared but its value is never read.": 1,
-    "src/pages/SocialPage.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1
+    "src/pages/ScreenerFilterPanel.tsx|TS6133|'k' is declared but its value is never read.": 1
   }
 }
