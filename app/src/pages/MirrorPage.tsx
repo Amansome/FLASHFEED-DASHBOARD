@@ -544,7 +544,10 @@ function MirrorCard({ row, signal, recentDays, keyword, refreshNonce, rollingWin
   const displayPrice = num(row.price)
   const displayChange = num(row.change_pct)
   const displayVolume = num(row.volume)
-  const quoteSourceLabel = row.quote_source || row.source || 'FinViz top mover'
+  // See ChartsGridPage: ScreenerRow has `sources: string[]`, never `source`, so
+  // the old fallback read undefined and the "Quote Source" cell said
+  // "FinViz top mover" whenever quote_source was null.
+  const quoteSourceLabel = row.quote_source || row.sources?.[0] || 'FinViz top mover'
   const selectedArticles = useMemo(() => {
     const source = Array.isArray(articleData?.articles) ? articleData.articles : []
     const tickerSpecific = source.filter((article: any) => articleMatchesTickerOrCompany(row, article))

@@ -5,8 +5,28 @@ import type { CorrelationEntry } from '@/lib/types'
 
 interface Props { entries: CorrelationEntry[] }
 
+// Only these columns have headers, so only these can ever reach the comparator.
+// Typing the sort key as the full `keyof CorrelationEntry` pulled in the three
+// boolean fields (price_move_valid, flat_previous_close, generated), which is
+// why `bv - av` would not typecheck. Narrowing to the reachable keys is what
+// makes the subtraction sound, and it means adding a boolean column to the
+// header below is now a compile error instead of a silent 1/0 sort.
+type SortKey = 'ticker' | 'correlation' | 'direction' | 'price'
+  | 'change_pct' | 'combined_sentiment' | 'sample_size' | 'reliability_weight'
+
+const SORT_COLUMNS: Array<{ key: SortKey; label: string }> = [
+  { key: 'ticker', label: 'TICKER' },
+  { key: 'correlation', label: 'CORRELATION' },
+  { key: 'direction', label: 'DIRECTION' },
+  { key: 'price', label: 'PRICE' },
+  { key: 'change_pct', label: 'CHG%' },
+  { key: 'combined_sentiment', label: 'SENT' },
+  { key: 'sample_size', label: 'EVIDENCE' },
+  { key: 'reliability_weight', label: 'REL' },
+]
+
 export function CorrelationTable({ entries }: Props) {
-  const [sort, setSort] = useState<{ key: keyof CorrelationEntry; dir: 'asc' | 'desc' }>({ key: 'correlation', dir: 'desc' })
+  const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' }>({ key: 'correlation', dir: 'desc' })
 
   const sorted = [...entries].sort((a, b) => {
     const av = a[sort.key] ?? 0
@@ -22,16 +42,7 @@ export function CorrelationTable({ entries }: Props) {
       <table className="w-full text-sm">
         <thead className="border-b border-border">
           <tr>
-            {[
-              { key: 'ticker' as keyof CorrelationEntry, label: 'TICKER' },
-              { key: 'correlation' as keyof CorrelationEntry, label: 'CORRELATION' },
-              { key: 'direction' as keyof CorrelationEntry, label: 'DIRECTION' },
-              { key: 'price' as keyof CorrelationEntry, label: 'PRICE' },
-              { key: 'change_pct' as keyof CorrelationEntry, label: 'CHG%' },
-              { key: 'combined_sentiment' as keyof CorrelationEntry, label: 'SENT' },
-              { key: 'sample_size' as keyof CorrelationEntry, label: 'EVIDENCE' },
-              { key: 'reliability_weight' as keyof CorrelationEntry, label: 'REL' },
-            ].map(({ key, label }) => (
+            {SORT_COLUMNS.map(({ key, label }) => (
               <th key={key} onClick={() => setSort(s => ({ key, dir: s.key === key && s.dir === 'desc' ? 'asc' : 'desc' }))}
                 className="px-3 py-2 text-left label cursor-pointer hover:text-neutral select-none">
                 {label} {sort.key === key ? (sort.dir === 'desc' ? '↓' : '↑') : ''}

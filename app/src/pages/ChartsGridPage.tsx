@@ -398,7 +398,12 @@ function ChartGridCard({ row, signal, recentDays, keyword, refreshNonce }: {
   const displayPrice = num(row.price)
   const displayChange = num(row.change_pct)
   const displayVolume = num(row.volume)
-  const quoteSourceLabel = row.quote_source || row.source || 'FinViz top mover'
+  // `row.source` never existed on ScreenerRow — the backend emits `sources`, a
+  // string[] (screener.js normalises it as `sources: doc.sources || []`). The
+  // old fallback therefore read undefined and always dropped through to the
+  // literal, so a row with a null quote_source but a real source list was
+  // mislabelled "FinViz top mover".
+  const quoteSourceLabel = row.quote_source || row.sources?.[0] || 'FinViz top mover'
   const rawArticles = useMemo(() => {
     const source = Array.isArray(articleData?.articles) ? articleData.articles : []
     const tickerSpecific = source.filter((article: any) => articleMatchesTickerOrCompany(row, article))

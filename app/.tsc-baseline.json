@@ -1,5 +1,5 @@
 {
-  "total": 78,
+  "total": 69,
   "signatures": {
     "src/components/shared/TickerDetailModal.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/components/shared/Toast.tsx|TS2503|Cannot find namespace 'NodeJS'.": 1,
@@ -16,11 +16,8 @@
     "src/lib/types.ts|TS2300|Duplicate identifier 'prediction_source_tone'.": 2,
     "src/pages/AIPage.tsx|TS2774|This condition will always return true since this function is always defined. Did you mean to call it instead?": 1,
     "src/pages/ChartsGridPage.tsx|TS2339|Property 'rel_volume' does not exist on type 'ScreenerRow'.": 2,
-    "src/pages/ChartsGridPage.tsx|TS2551|Property 'source' does not exist on type 'ScreenerRow'. Did you mean 'sources'?": 1,
     "src/pages/ChartsGridPage.tsx|TS6133|'secondsFromTimestamp' is declared but its value is never read.": 1,
     "src/pages/ChartsGridPage.tsx|TS6133|'signal' is declared but its value is never read.": 1,
-    "src/pages/CorrelationTable.tsx|TS2362|The left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.": 2,
-    "src/pages/CorrelationTable.tsx|TS2363|The right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type.": 2,
     "src/pages/DecisionMapPanel.tsx|TS2345|Argument of type '{ timestamp: number; time?: number | undefined; timestampUtc?: string | undefined; displayTime?: string | undefined; rollingWindowUsed?: string | undefined; sourceSocialWindowStart?: string | undefined; ... 25 more ...; evidenceWindowMinutes?: number | ... 1 more ... | undefined; }' is not assignable to parameter of type 'VolumePointLike'.": 4,
     "src/pages/DecisionMapPanel.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/pages/DecisionMapPanel.tsx|TS6133|'ageLabel' is declared but its value is never read.": 1,
@@ -40,7 +37,6 @@
     "src/pages/DecisionMapPanel.tsx|TS7006|Parameter 'value' implicitly has an 'any' type.": 1,
     "src/pages/DecisionMapPanel.tsx|TS7016|Could not find a declaration file for module 'three'. 'node_modules/three/build/three.module.js' implicitly has an 'any' type.": 1,
     "src/pages/MirrorPage.tsx|TS2339|Property 'rel_volume' does not exist on type 'ScreenerRow'.": 2,
-    "src/pages/MirrorPage.tsx|TS2551|Property 'source' does not exist on type 'ScreenerRow'. Did you mean 'sources'?": 1,
     "src/pages/MirrorPage.tsx|TS6133|'chartQuoteFromCandles' is declared but its value is never read.": 1,
     "src/pages/MirrorPage.tsx|TS6133|'screenerAgeSeconds' is declared but its value is never read.": 1,
     "src/pages/MirrorPage.tsx|TS6133|'signal' is declared but its value is never read.": 1,
@@ -53,9 +49,6 @@
     "src/pages/OverviewPage.tsx|TS7031|Binding element 'phrase' implicitly has an 'any' type.": 1,
     "src/pages/PredictionAuditPage.tsx|TS2339|Property 'source' does not exist on type 'AuditRow'.": 1,
     "src/pages/ScreenerFilterPanel.tsx|TS6133|'k' is declared but its value is never read.": 1,
-    "src/pages/sentchart/ChartsPage.tsx|TS2339|Property 'detected_at' does not exist on type 'EnrichArticle'.": 1,
-    "src/pages/sentchart/ChartsPage.tsx|TS2339|Property 'title' does not exist on type 'EnrichArticle'.": 1,
-    "src/pages/sentchart/ChartsPage.tsx|TS2551|Property 'publish_ts' does not exist on type 'EnrichArticle'. Did you mean 'published_at'?": 1,
     "src/pages/SocialPage.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1
   }
 }

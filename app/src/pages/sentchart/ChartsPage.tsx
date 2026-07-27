@@ -417,7 +417,12 @@ export function ChartsPage() {
     const last = candles[candles.length - 1].time
     const grouped = new Map<number, { bull: number; bear: number; neutral: number; headline?: string }>()
     for (const a of arts) {
-      const ts = Number(a.published_at || a.publish_ts || a.detected_at)
+      // published_at (unix seconds) is the only timestamp EnrichArticle carries
+      // and the only one /api/ticker/<t>/enrich emits; publish_ts and
+      // detected_at never existed, so both fallbacks read undefined. Behaviour
+      // is unchanged — a missing published_at already failed the isFinite guard
+      // below, exactly as the dead fallbacks did.
+      const ts = Number(a.published_at)
       if (!Number.isFinite(ts) || ts < first || ts > last) continue
       const time = bucketStart(ts, tf)
       const item = grouped.get(time) || { bull: 0, bear: 0, neutral: 0 }
@@ -425,7 +430,7 @@ export function ChartsPage() {
       if (sentiment === 'bullish') item.bull += 1
       else if (sentiment === 'bearish') item.bear += 1
       else item.neutral += 1
-      item.headline ||= a.headline || a.title
+      item.headline ||= a.headline   // `title` is not a field on EnrichArticle either
       grouped.set(time, item)
     }
     const out: NewsMarker[] = Array.from(grouped.entries()).map(([time, item]) => {
