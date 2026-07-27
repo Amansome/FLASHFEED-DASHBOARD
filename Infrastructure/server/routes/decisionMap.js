@@ -2153,15 +2153,19 @@ async function chartCandlePathEvidence(db, scoredRows = [], maxPoints = 120, win
     const expectedTimeframeVolume = averageVolume > 0
       ? averageVolume * (volumeTfMinutes / 390)
       : sameDayExpectedTimeframeVolume
+    const rowRelVolumeFallback = toNumber(row.relativeVolume, null)
+    let latestReliableRelVolume = rowRelVolumeFallback
     const points = []
     for (const candle of pathCandles) {
       const close = Number(candle.close || 0)
       if (!firstClose || !close) continue
       const rawTimeframeVolume = Number(candle.volume)
-      const timeframeVolume = Number.isFinite(rawTimeframeVolume) ? Math.max(0, rawTimeframeVolume) : null
+      const timeframeVolume = Number.isFinite(rawTimeframeVolume) && rawTimeframeVolume > 0 ? rawTimeframeVolume : null
       const timeframeRelVolume = timeframeVolume != null && expectedTimeframeVolume && expectedTimeframeVolume > 0
         ? timeframeVolume / expectedTimeframeVolume
         : null
+      if (timeframeRelVolume != null) latestReliableRelVolume = timeframeRelVolume
+      const pressureRelVolume = timeframeRelVolume ?? latestReliableRelVolume
       const evidence = evidenceSnapshotAt(timeline, ticker, Number(candle.time || 0), Number(row.combinedSentiment || 0), Math.max(5, Math.round(windowHours * 60)))
       points.push(decisionPointFromValues({
         ticker,
@@ -2180,7 +2184,7 @@ async function chartCandlePathEvidence(db, scoredRows = [], maxPoints = 120, win
         socialDensityPerHour: evidence.socialDensityPerHour,
         evidenceWindowMinutes: evidence.evidenceWindowMinutes,
         priceChangePct: ((close - firstClose) / firstClose) * 100,
-        relativeVolume: timeframeRelVolume,
+        relativeVolume: pressureRelVolume,
         currentDollarVolume: timeframeVolume == null ? null : close * timeframeVolume,
         price: close,
         volume: timeframeVolume,
@@ -2189,7 +2193,9 @@ async function chartCandlePathEvidence(db, scoredRows = [], maxPoints = 120, win
         volumeTimeframe: volumeTf,
         volumeTimeframeMinutes: volumeTfMinutes,
         relativeVolumeBasis: timeframeVolume == null
-          ? `chart ${volumeTf} bar volume unavailable`
+          ? latestReliableRelVolume != null
+            ? `chart ${volumeTf} bar volume unavailable; using latest reliable/screener relative volume for path pressure`
+            : `chart ${volumeTf} bar volume unavailable`
           : averageVolume > 0
           ? `chart ${volumeTf} bar volume / expected ${volumeTf} volume from average daily volume`
           : sameDayExpectedTimeframeVolume
