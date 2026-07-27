@@ -331,7 +331,14 @@ export interface ScreenerRow {
   screener_snapshot_at?: number | string | null
   cache_status?: string | null
   change_percent?: number | null
+  // Both spellings are real and the API is not consistent about them: the
+  // screener emits `rel_volume` (live rows carry e.g. 0.57 while
+  // relative_volume is null), and decisionMap.js reads
+  // `doc.rel_volume ?? doc.relative_volume`. ChartsGridPage and MirrorPage were
+  // already reading the one the API actually sends; only the type was missing
+  // it, so this is a type correction — the RelVol cells were never broken.
   relative_volume?: number | null
+  rel_volume?:      number | null
   decision_candidate?: boolean
   decision_candidate_score?: number
   decision_candidate_source?: string
