@@ -1,3 +1,16 @@
+// NOT REQUIRED ANY MORE — kept as a manual/one-off tool, not a setup step.
+//
+// Every index defined below is also ensured on boot by ensureRuntimeIndexes()
+// in ../index.js, which is awaited before the server starts serving. Running
+// this script is therefore optional; forgetting to run it is no longer a way to
+// break the app. It used to be: /api/articles/recent-lite hinted
+// feed_sort_time_desc, which only existed here, and returned 500 on every
+// request against any database where this had not been run.
+//
+// If you add an index here, add it to ensureRuntimeIndexes() as well, or the
+// same class of failure comes back. The two lists were reconciled and verified
+// equal (45/45 recreated from an index-free database by startup alone); nothing
+// else in the repo references this file except the `indexes` npm script.
 import mongoose from 'mongoose'
 
 const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI || 'mongodb://localhost:27017/feedflash'

@@ -7477,6 +7477,49 @@ async function ensureRuntimeIndexes() {
       { unique: true, partialFilterExpression: { snapshot_minute: { $type: 'number' } } },
     ),
     db.collection("source_status").createIndex({ source: 1 }, { unique: true }),
+
+    // ── Reconciled from scripts/add_mongodb_indexes.js ──────────────────────
+    // That script (`npm run indexes`) was the only place these were defined, and
+    // it is run by hand. feed_sort_time_desc proved what that costs: a route
+    // hinted an index the script would have created, nobody had run it against
+    // this database, and /api/articles/recent-lite returned 500 on every
+    // request. Nothing should depend on an ops script having been remembered, so
+    // every index the script defines is ensured here too.
+    //
+    // Deliberately unnamed, matching the convention above: if a database already
+    // carries the script's explicitly-named equivalent, createIndex reports
+    // IndexOptionsConflict (same keys, different name), allSettled absorbs it,
+    // and the existing index stands. That is harmless now that no query hints an
+    // index by name — the one that did was removed with this fix.
+    db.collection("articles").createIndex({ ticker: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ tickers: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ symbol: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ symbols: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ article_kind: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ ticker: 1, sentiment: 1 }),
+    db.collection("articles").createIndex({ publish_date: -1 }),
+    db.collection("articles").createIndex({ fetched_date: -1 }),
+    db.collection("articles").createIndex({ detected_at: -1 }),
+    db.collection("articles").createIndex({ source: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ sentiment: 1, publish_date: -1 }),
+    db.collection("articles").createIndex({ ticker: 1, event_sec: -1 }),
+    db.collection("articles").createIndex({ tickers: 1, event_sec: -1 }),
+    db.collection("articles").createIndex({ market_session: 1, event_sec: -1 }),
+    db.collection("articles").createIndex({ catalystCategory: 1, event_sec: -1 }),
+    db.collection("socials").createIndex({ sentiment: 1, fetched_at: -1 }),
+    // unique in the script; if the collection already holds duplicate tickers
+    // the build fails and allSettled absorbs it, exactly as the script's own
+    // try/catch did — it never becomes a boot failure.
+    db.collection("screeners").createIndex({ ticker: 1 }, { unique: true }),
+    db.collection("screeners").createIndex({ quote_updated_at: -1, change_pct: -1 }),
+    db.collection("screeners").createIndex({ rel_volume: -1, volume: -1 }),
+    db.collection("screeners").createIndex({ threshold_feature_updated_at: -1 }),
+    db.collection("screeners").createIndex({ threshold_feature_policy_version: 1, threshold_setup_score: -1, rel_volume: -1 }),
+    db.collection("source_status").createIndex({ type: 1, last_checked_at: -1 }),
+    db.collection("source_status").createIndex({ status: 1, last_success_at: -1 }),
+    db.collection("prediction_signals").createIndex({ "entry_signal.status": 1, signal_sec: -1 }),
+    db.collection("prediction_signals").createIndex({ "entry_signal.entry_ready": 1, signal_sec: -1 }),
+    db.collection("active_ticker_context").createIndex({ rank: 1, signal_sec: -1 }),
   ])
 }
 
