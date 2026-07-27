@@ -995,12 +995,20 @@ function ThreeDecisionMap({
   const stateRef = useRef({ theta: -0.7, phi: 1.12, radius: 18, dragging: false, x: 0, y: 0 })
   const selectedTickerRef = useRef(selectedTicker || '')
   const playbackRef = useRef<{ ticker?: string; progress: number | null }>({ ticker: selectedTicker, progress: playbackProgress ?? null })
-  const trailApiRef = useRef<{ show: (ticker: string) => void; clear: () => void } | null>(null)
+  const trailApiRef = useRef<{
+    show: (ticker: string) => void
+    clear: () => void
+    setPlaybackTicker: (ticker: string) => void
+  } | null>(null)
   const [tooltip, setTooltip] = useState<DecisionTooltip | null>(null)
 
   useEffect(() => {
     selectedTickerRef.current = selectedTicker || ''
     playbackRef.current = { ticker: selectedTicker, progress: playbackProgress ?? null }
+    // playbackProgress is non-null only while a journey is actively tracing, so
+    // it — not mere selection — is what hides a baseline.
+    const playingTicker = selectedTicker && playbackProgress != null ? selectedTicker : ''
+    trailApiRef.current?.setPlaybackTicker(playingTicker)
     if (selectedTicker) trailApiRef.current?.show(selectedTicker)
     else trailApiRef.current?.clear()
   }, [selectedTicker, playbackProgress])
@@ -1060,6 +1068,46 @@ function ThreeDecisionMap({
     const trailGroup = new THREE.Group()
     const trailHitObjects: THREE.Object3D[] = []
     group.add(trailGroup)
+
+    // ── Always-on path baseline ───────────────────────────────────────────────
+    // trailGroup holds at most ONE path and is wiped on every show/clear, so on
+    // its own the map reads as an empty cube until you select or hover something
+    // — the inverse of what the map is for. Every row's journey is therefore
+    // drawn once here, dimly, and simply stays on screen. Selection and hover
+    // still paint a brighter amplified trail on top via trailGroup; this layer
+    // is the resting state underneath it.
+    //
+    // The one time a baseline is removed is playback: while a journey is
+    // actively tracing, its own flat line would sit under the animation and give
+    // away the whole route, so that ticker's baseline hides and the traced trail
+    // is the only thing drawing. Every OTHER ticker's baseline stays up.
+    const basePathGroup = new THREE.Group()
+    group.add(basePathGroup)
+    const basePathByTicker = new Map<string, THREE.Line>()
+    rows.forEach(row => {
+      // amplify=false: the journey at its true position in the cube. The
+      // amplified (outside-rails) variant is the selection inspection lens and
+      // would misplace a resting path.
+      const basePoints = displayPathVectors(row, false)
+      if (basePoints.length < 2) return
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(basePoints),
+        new THREE.LineBasicMaterial({
+          color: pathColorValue(row.path_color),
+          transparent: true,
+          opacity: 0.3,
+          depthWrite: false,   // dozens of dim paths shouldn't z-fight the dots
+        }),
+      )
+      line.userData.ticker = row.ticker
+      basePathGroup.add(line)
+      basePathByTicker.set(row.ticker, line)
+    })
+    // '' restores every baseline. Called with the playing ticker while playback
+    // is running, and with '' the moment it stops.
+    const setPlaybackTicker = (ticker: string) => {
+      basePathByTicker.forEach((line, key) => { line.visible = key !== ticker })
+    }
     let hoveredMesh: THREE.Mesh | null = null
     let hoveredTicker = ''
     let pointerDownX = 0
@@ -1438,6 +1486,10 @@ function ThreeDecisionMap({
         applySelectionStyle()
         frameTickerPath('')
       },
+      // Only the emphasis trail is cleared above; the dim baselines persist, so
+      // deselecting returns the map to the full field of paths rather than to
+      // an empty cube.
+      setPlaybackTicker,
     }
     applySelectionStyle()
     if (selectedTickerRef.current) {
@@ -1465,6 +1517,13 @@ function ThreeDecisionMap({
       try {
         trailApiRef.current = null
         clearTrailChildren()
+        // Baselines are built once per scene and never go through
+        // clearTrailChildren, so they need their own teardown.
+        basePathByTicker.clear()
+        while (basePathGroup.children.length) {
+          const child = basePathGroup.children.pop()
+          if (child) disposeObject(child)
+        }
         sphereGeometry.dispose()
         haloGeometry.dispose()
         rocketNoseGeometry.dispose()
