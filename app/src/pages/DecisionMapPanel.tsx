@@ -974,6 +974,8 @@ function ThreeDecisionMap({
   selectedTicker,
   playbackProgress,
   miniPriceDensity,
+  activeMiniTicker,
+  isMiniChartLoading,
   onSelectTicker,
   onHoverTicker,
 }: {
@@ -984,6 +986,8 @@ function ThreeDecisionMap({
   selectedTicker?: string
   playbackProgress?: number | null
   miniPriceDensity?: MiniPriceDensity | null
+  activeMiniTicker?: string
+  isMiniChartLoading?: boolean
   onSelectTicker?: (ticker: string) => void
   onHoverTicker?: (ticker: string) => void
 }) {
@@ -1941,6 +1945,8 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
               selectedTicker={selectedTicker || focusTicker}
               playbackProgress={playbackProgress}
               miniPriceDensity={activeMiniPriceDensity}
+              activeMiniTicker={activeMiniTicker}
+              isMiniChartLoading={isMiniChartLoading}
               onSelectTicker={selectTicker}
               onHoverTicker={setHoveredTicker}
             />
@@ -2191,6 +2197,8 @@ export function DecisionMapPanel({ focusTicker: forcedFocusTicker = '', single =
               selectedTicker={selectedTicker || undefined}
               playbackProgress={playbackProgress}
               miniPriceDensity={activeMiniPriceDensity}
+              activeMiniTicker={activeMiniTicker}
+              isMiniChartLoading={isMiniChartLoading}
               onSelectTicker={selectTicker}
               onHoverTicker={setHoveredTicker}
             />
