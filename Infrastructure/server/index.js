@@ -7438,6 +7438,12 @@ async function ensureRuntimeIndexes() {
     db.collection("articles").createIndex({ ticker: 1, fetched_date: -1 }),
     db.collection("articles").createIndex({ source: 1, fetched_date: -1 }),
     db.collection("articles").createIndex({ sentiment: 1, event_type: 1 }),
+    // Backs the /api/articles/recent-lite feed (range filter + sort, both on
+    // feed_sort_time). It was only ever created by the manual `npm run indexes`
+    // script, which had not been run against this database, so the route's
+    // .hint() for it failed the whole query with BadValue. Ensured here with the
+    // other articles indexes so every environment gets it on boot.
+    db.collection("articles").createIndex({ feed_sort_time: -1 }, { name: "feed_sort_time_desc" }),
     db.collection("socials").createIndex({ ticker: 1, fetched_at: -1 }),
     db.collection("socials").createIndex({ symbol: 1, fetched_at: -1 }),
     db.collection("socials").createIndex({ platform: 1, fetched_at: -1 }),

@@ -708,7 +708,12 @@ router.get('/recent-lite', async (req, res) => {
       .project(ARTICLE_LIST_PROJECTION)
       .sort({ feed_sort_time: -1 })
       .limit(scanLimit)
-      .hint('feed_sort_time_desc')
+      // No .hint(): a hint is a hard requirement, so when feed_sort_time_desc
+      // was missing this whole route returned BadValue and the Overview news
+      // feed went blank, rather than merely running slower. With the index
+      // ensured at startup the planner picks it on its own — explain confirms
+      // hinted and unhinted produce the identical IXSCAN plan — so forcing it
+      // bought nothing and only removed the ability to degrade gracefully.
       .maxTimeMS(8_000)
       .toArray()
     const requestedKind = String(article_kind || '').toLowerCase()
