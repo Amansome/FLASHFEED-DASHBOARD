@@ -314,9 +314,10 @@ export interface ScreenerRow {
   fallback_confidence?: number | null
   evidence_score?: number | null
   model_mode?: string | null
-  prediction_source_label?: string | null
-  prediction_source_code?: string | null
-  prediction_source_tone?: string | null
+  // prediction_source_code / _label / _tone were declared twice in this same
+  // interface with identical `?: string | null` types — TS2300 x3 x2. The
+  // surviving declaration lives with the other prediction_* fields above
+  // (next to prediction_explanation), which is where it belongs.
   entry_signal?: Record<string, unknown> | null
   threshold_setup_status?: string | null
   threshold_setup_score?: number | null

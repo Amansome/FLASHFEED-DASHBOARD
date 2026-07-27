@@ -1,5 +1,5 @@
 {
-  "total": 65,
+  "total": 59,
   "signatures": {
     "src/components/shared/TickerDetailModal.tsx|TS2550|Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.": 1,
     "src/components/shared/Toast.tsx|TS2503|Cannot find namespace 'NodeJS'.": 1,
@@ -11,9 +11,6 @@
     "src/lib/screenerView.ts|TS18048|'t.message_count' is possibly 'undefined'.": 1,
     "src/lib/screenerView.ts|TS18048|'t.social_sentiment' is possibly 'undefined'.": 6,
     "src/lib/screenerView.ts|TS18048|'t.structured_sentiment' is possibly 'undefined'.": 4,
-    "src/lib/types.ts|TS2300|Duplicate identifier 'prediction_source_code'.": 2,
-    "src/lib/types.ts|TS2300|Duplicate identifier 'prediction_source_label'.": 2,
-    "src/lib/types.ts|TS2300|Duplicate identifier 'prediction_source_tone'.": 2,
     "src/pages/AIPage.tsx|TS2774|This condition will always return true since this function is always defined. Did you mean to call it instead?": 1,
     "src/pages/ChartsGridPage.tsx|TS6133|'secondsFromTimestamp' is declared but its value is never read.": 1,
     "src/pages/ChartsGridPage.tsx|TS6133|'signal' is declared but its value is never read.": 1,
